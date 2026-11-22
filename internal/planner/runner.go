@@ -547,10 +547,11 @@ func (r *Runner) DiscoverIssues(ctx context.Context, input DiscoveryInput) (Disc
 	if policy.RequireAssigneeCurrentUser && login == "" {
 		return DiscoveryResult{Skipped: 1}, nil
 	}
+	// When RequireAssigneeCurrentUser, an UNASSIGNED issue is treated as
+	// assigned to the current user (operator default). Fetch every issue that
+	// carries the trigger label and let shouldClaimIssue decide, so unassigned
+	// issues are not excluded by the GitHub-side --assignee filter.
 	assigneeFilter := ""
-	if policy.RequireAssigneeCurrentUser {
-		assigneeFilter = login
-	}
 	issues, err := r.listOpenIssuesForDiscovery(ctx, ListOpenIssuesInput{Repo: input.Repo, CWD: project.RepoPath, Limit: input.Limit, Assignee: assigneeFilter, IssueNumber: input.IssueNumber}, policy)
 	if err != nil {
 		return DiscoveryResult{}, err
@@ -899,7 +900,7 @@ func (r *Runner) runDiscoverIssueStep(ctx context.Context, input stepInput) (pla
 		releaseOnError = false
 		return checkpoint, nil
 	}
-	if !manual && policy.RequireAssigneeCurrentUser && currentLogin != "" && !includesLogin(detail.Assignees, currentLogin) {
+	if !manual && policy.RequireAssigneeCurrentUser && currentLogin != "" && len(detail.Assignees) > 0 && !includesLogin(detail.Assignees, currentLogin) {
 		checkpoint := input.Checkpoint
 		checkpoint.Issue = &checkpointIssue{Repo: repo, IssueNumber: issueNumber, Title: detail.Title, Body: detail.Body, URL: detail.URL, Assignees: cloneStrings(detail.Assignees), Labels: cloneStrings(detail.Labels), CurrentUserLogin: currentLogin, SpecPath: buildSpecPath(r.now(), issueNumber, detail.Title), RequestedReviewers: resolveRequestedReviewers(input.Project, input.Loop, detail.Assignees, currentLogin)}
 		checkpoint.ClaimedLockKey = lockKey
@@ -2068,7 +2069,9 @@ func plannerQueueItemIsManual(queueItem storage.QueueItemRecord) bool {
 }
 
 func shouldClaimIssue(issue IssueSummary, login string, policy DiscoveryPolicy) bool {
-	if policy.RequireAssigneeCurrentUser && !includesLogin(issue.Assignees, login) {
+	// Unassigned issues are treated as assigned to the current user; only
+	// issues explicitly assigned to someone else are skipped.
+	if policy.RequireAssigneeCurrentUser && len(issue.Assignees) > 0 && !includesLogin(issue.Assignees, login) {
 		return false
 	}
 	return labelsMatch(issue.Labels, policy.Labels, policy.LabelMode)

@@ -905,9 +905,10 @@ func (r *Runner) DiscoverIssues(ctx context.Context, input DiscoveryInput) (Disc
 		// route them. Scope to the owner's configured Plane member UUID when set
 		// (empty = label-only discovery); never fall back to the GitHub login.
 		assigneeFilter = policy.PlaneAssigneeID
-	} else if !networkpolicy.IsRouted(policy.RoutedClaimPolicy) && policy.RequireAssigneeCurrentUser {
-		assigneeFilter = login
 	}
+	// Non-Plane: fetch every trigger-labeled issue and let shouldClaimWorkerIssue
+	// decide. Unassigned issues are treated as assigned to the current user
+	// (operator default), so the GitHub-side --assignee filter is omitted.
 	requiredTargetLabel, err := r.requiredTargetLabel(ctx, project.ID)
 	if err != nil {
 		return DiscoveryResult{}, err
@@ -4132,7 +4133,9 @@ func shouldClaimWorkerIssue(issue IssueSummary, login string, policy DiscoveryPo
 		decision := networkpolicy.EvaluateWorker(policy.RoutedClaimPolicy, issue.Labels, issue.AssigneeUsers)
 		return decision.Allowed
 	}
-	if policy.RequireAssigneeCurrentUser && !includesLogin(issue.Assignees, login) {
+	// Unassigned issues are treated as assigned to the current user; only
+	// issues explicitly assigned to someone else are skipped.
+	if policy.RequireAssigneeCurrentUser && len(issue.Assignees) > 0 && !includesLogin(issue.Assignees, login) {
 		return false
 	}
 	return labelsMatch(issue.Labels, policy.Labels, policy.LabelMode)
