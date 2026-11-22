@@ -137,6 +137,8 @@ type NotificationSoundLevel string
 const (
 	NotificationSoundLevelActionRequired NotificationSoundLevel = "action_required"
 	NotificationSoundLevelFailure        NotificationSoundLevel = "failure"
+	NotificationSoundLevelSuccess        NotificationSoundLevel = "success"
+	NotificationSoundLevelInfo           NotificationSoundLevel = "info"
 )
 
 type ServerConfig struct {

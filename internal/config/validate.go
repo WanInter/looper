@@ -1097,7 +1097,7 @@ func isValidLogLevel(level LogLevel) bool {
 
 func isValidNotificationSoundLevel(level NotificationSoundLevel) bool {
 	switch level {
-	case NotificationSoundLevelActionRequired, NotificationSoundLevelFailure:
+	case NotificationSoundLevelActionRequired, NotificationSoundLevelFailure, NotificationSoundLevelSuccess, NotificationSoundLevelInfo:
 		return true
 	default:
 		return false

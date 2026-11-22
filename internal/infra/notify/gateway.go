@@ -499,6 +499,18 @@ func (g *Gateway) recordFeishuApp(ctx context.Context, payload SystemNotificatio
 	}
 
 	if !webhookLevelAllowed(cfg.Levels, payload.Level) {
+		// The plain-text ping is limited to action_required/failure, but we still
+		// materialise + refresh the loop's rich anchor card (linked issue/PR ·
+		// repo · title · milestone timeline · takeover hint) and append a
+		// timestamped milestone, so EVERY task surfaces on Feishu — not only the
+		// two levels the text ping allows.
+		if loopID := strings.TrimSpace(payload.LoopID); loopID != "" {
+			if anchorToken, tokenErr := g.feishuTenantToken(ctx, appID, appSecret); tokenErr == nil {
+				g.ensureFeishuThreadRoot(ctx, anchorToken, chatID, loopID)
+				g.updateFeishuThreadHeader(ctx, anchorToken, loopID)
+			}
+			g.recordNotificationMilestone(ctx, payload)
+		}
 		return persist(build("skipped", "level filtered", nil))
 	}
 
@@ -520,14 +532,14 @@ func (g *Gateway) recordFeishuApp(ctx context.Context, payload SystemNotificatio
 		return persist(build("failed", err.Error(), nil))
 	}
 
+	rootMessageID := g.ensureFeishuThreadRoot(ctx, token, chatID, payload.LoopID)
+	g.updateFeishuThreadHeader(ctx, token, payload.LoopID)
+	g.recordNotificationMilestone(ctx, payload)
+
 	// Non-interactive updates (PR opened, progress, completion) are plain text —
 	// only a mid-run question needs an interactive card with buttons. Thread the
 	// message under the loop's root so a task's updates aggregate into one Feishu
 	// thread instead of stacking as separate cards.
-	rootMessageID := g.ensureFeishuThreadRoot(ctx, token, chatID, payload.LoopID)
-	// Refresh the anchor card so its colour/label tracks the loop's status
-	// (processing → done/failed) as lifecycle updates arrive.
-	g.updateFeishuThreadHeader(ctx, token, payload.LoopID)
 	content, err := json.Marshal(map[string]string{"text": feishuNotificationText(payload)})
 	if err != nil {
 		return persist(build("failed", err.Error(), nil))
@@ -552,6 +564,24 @@ func feishuNotificationText(payload SystemNotificationPayload) string {
 		return "Looper update"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// recordNotificationMilestone appends a human-scannable milestone to a loop's
+// story from a lifecycle notification, so the Feishu anchor card renders a full
+// timestamped narrative (start · spec · PR · done · failed). Best-effort;
+// identical consecutive entries are skipped by RecordMilestone.
+func (g *Gateway) recordNotificationMilestone(ctx context.Context, payload SystemNotificationPayload) {
+	text := strings.TrimSpace(payload.Body)
+	if text == "" {
+		text = strings.TrimSpace(payload.Title)
+	}
+	if text == "" {
+		return
+	}
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	g.RecordMilestone(ctx, payload.LoopID, text)
 }
 
 // HITLAskCard is a mid-run human-in-the-loop question rendered as an interactive
@@ -710,6 +740,11 @@ func (g *Gateway) RecordMilestone(ctx context.Context, loopID, text string) {
 	loop, err := g.repositories.Loops.GetByID(ctx, loopID)
 	if err != nil || loop == nil {
 		return
+	}
+	if existing := loops.ReadMilestones(loop.MetadataJSON); len(existing) > 0 {
+		if strings.TrimSpace(existing[len(existing)-1].Text) == text {
+			return
+		}
 	}
 	nowISO := eventlog.FormatJavaScriptISOString(g.now().UTC())
 	meta, err := loops.AppendMilestone(loop.MetadataJSON, loops.Milestone{At: nowISO, Text: text})
