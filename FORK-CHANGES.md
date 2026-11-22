@@ -36,6 +36,11 @@
 - **补充 `76c00b0`**：交接时**同时加 `looper:worker-ready`**（Worker 的真实发现触发标签）——因为 Coordinator 的 `decideAutonomous` 还要求 issue 有 `triaged`，spec 类 issue 常缺该标签，直接加 `looper:worker-ready` 可让 Worker 立刻实现、不依赖 Coordinator 闸门。
 - **活体验证**：spec PR #62 clean → 转 `spec-ready`，关联 issue **#21** 标签由 `['looper:plan']` → `['dispatch/implement','looper:worker-ready']`；`looper work --issue 21` → **Worker 启动**（"Implement specs/2026-11-22-21-p2-wal-checkpoint.md"，loop #65 `execute` running）✅
 
+## 6. `9f2c9be` — fix(coordinator): 永不向 PR 作者请求评审
+- **问题**：`enableSelfReview=true`（单账号）后，`reviewAssignmentEligible` 不再排除作者 → Coordinator 发现阶段对「自己」的 PR 请求评审 → GitHub **422 `Review cannot be requested from pull request author`** → **整个 scheduler tick 失败**（发现 + 派单中断，日志 `looperd scheduler tick failed`）。
+- **修法**：`reviewAssignmentEligible` **永远排除作者**（请求自审本就不可能）；自审改由 reviewer 的**标签发现**处理。
+- **另注（运维，非代码）**：`WanInter/looper` 曾被注册为监控项目，但该仓 **Issues 关闭** → `planner/worker discovery failed … has disabled issues` → 同样拖垮每个 tick。已 `looper project remove looper --force`。
+
 ---
 
 ## 建议
