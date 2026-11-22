@@ -1530,6 +1530,9 @@ func mergeReviewerAutoMergeConfig(config *ReviewerAutoMergeConfig, partial Parti
 	if partial.Scope != nil {
 		config.Scope = *partial.Scope
 	}
+	if partial.DirectMerge != nil {
+		config.DirectMerge = *partial.DirectMerge
+	}
 }
 
 func mergeReviewerSkillsConfig(config *ReviewerSkillsConfig, partial PartialReviewerSkillsConfig) {

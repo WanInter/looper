@@ -1821,6 +1821,10 @@ func (a reviewerGitHubAdapter) EnableAutoMerge(ctx context.Context, input github
 	return a.gateway.EnableAutoMerge(ctx, input)
 }
 
+func (a reviewerGitHubAdapter) MergePullRequest(ctx context.Context, input githubinfra.MergePullRequestInput) error {
+	return a.gateway.MergePullRequest(ctx, input)
+}
+
 func (a reviewerGitHubAdapter) AddPullRequestReaction(ctx context.Context, input reviewer.PullRequestReactionInput) error {
 	if client, ok, err := a.forgejo(ctx, input.Repo, input.CWD); ok || err != nil {
 		if err != nil {

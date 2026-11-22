@@ -5770,6 +5770,58 @@ func TestProcessClaimedItemAutoMergeApprovesAndEnablesAutoMergeWhenCriteriaPass(
 	}
 }
 
+func TestProcessClaimedItemAutoMergeDirectMergesWhenCriteriaPass(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	github := &fakeGitHubGateway{
+		author:              "octocat",
+		currentLogin:        "reviewer",
+		labels:              []string{"looper:worker-ready"},
+		reviewMarkerMissing: true,
+		reviewRequests:      []string{"reviewer"},
+		viewBody:            "Implements feature.\n\nCloses #358",
+		issueDetail:         githubinfra.IssueDetail{Number: 358, Body: "## Acceptance criteria\n- ship app change\n- add more\n", Labels: []string{"triaged", "dispatch/plan"}},
+	}
+	agent := &fakeAgentExecutor{results: []AgentResult{{Status: "completed", Summary: "No actionable findings", Stdout: `__LOOPER_RESULT__={"summary":"No actionable findings"}`, ParseStatus: "parsed"}}}
+	runner := New(Options{DB: fixture.coordinator.DB(), Repos: fixture.repos, GitHub: github, Git: &fakeGitGateway{localDiff: "diff --git a/app.go b/app.go\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n"}, AgentExecutor: agent, Logger: fixture.logger, Now: fixture.now, ReviewEvents: config.ReviewerReviewEventsConfig{Clean: config.ReviewerReviewEventApprove}, LoopConfig: testReviewerLoopConfig(), CustomInstructions: reviewerAutoMergeDirectMergeTestConfig(t), CriteriaVerifier: stubCriteriaVerifier{responses: map[criteria.AcceptanceCriterion]criteria.CriterionAssessment{
+		"ship app change": {Verdict: criteria.VerdictPass, Justification: "present in diff", Evidence: []criteria.Evidence{{FilePath: "app.go", StartLine: 1, EndLine: 2}}},
+		"add more":        {Verdict: criteria.VerdictPass, Justification: "present in diff", Evidence: []criteria.Evidence{{FilePath: "app.go", StartLine: 2, EndLine: 2}}},
+	}}})
+	ctx := context.Background()
+	nowISO := fixture.nowISO()
+	repo := "acme/looper"
+	prNumber := int64(42)
+	metadata := `{"followUpdates":true,"loop":{"enabled":true}}`
+	loop := storage.LoopRecord{ID: "loop_direct_merge_pass", Seq: 1, ProjectID: "project_1", Type: "reviewer", TargetType: "pull_request", Repo: &repo, PRNumber: &prNumber, Status: "queued", MetadataJSON: &metadata, CreatedAt: nowISO, UpdatedAt: nowISO}
+	if err := fixture.repos.Loops.Upsert(ctx, loop); err != nil {
+		t.Fatalf("Loops.Upsert() error = %v", err)
+	}
+	queue, err := runner.enqueue(ctx, enqueueInput{ProjectID: "project_1", LoopID: loop.ID, Repo: repo, PRNumber: prNumber})
+	if err != nil {
+		t.Fatalf("enqueue() error = %v", err)
+	}
+	claimed, err := fixture.repos.Queue.ClaimNextOfType(ctx, fixture.nowISO(), "reviewer-worker-1", "reviewer")
+	if err != nil || claimed == nil || claimed.ID != queue.ID {
+		t.Fatalf("ClaimNextOfType() = (%#v, %v), want queued item %s", claimed, err, queue.ID)
+	}
+	result, err := runner.ProcessClaimedItem(ctx, *claimed)
+	if err != nil {
+		t.Fatalf("ProcessClaimedItem() error = %v", err)
+	}
+	if result.Status != "success" {
+		t.Fatalf("result = %#v, want success", result)
+	}
+	if len(github.enableAutoMergeCalls) != 0 {
+		t.Fatalf("enableAutoMergeCalls = %#v, want none (direct merge)", github.enableAutoMergeCalls)
+	}
+	if len(github.mergePullRequestCalls) != 1 || github.mergePullRequestCalls[0].Strategy != config.ReviewerAutoMergeStrategySquash {
+		t.Fatalf("mergePullRequestCalls = %#v, want one squash direct merge", github.mergePullRequestCalls)
+	}
+	if github.mergePullRequestCalls[0].HeadSHA != "abc123" {
+		t.Fatalf("mergePullRequestCalls[0].HeadSHA = %q, want abc123", github.mergePullRequestCalls[0].HeadSHA)
+	}
+}
+
 func TestProcessClaimedItemAutoMergeApprovesAndCommentsWhenAutoMergeRefused(t *testing.T) {
 	t.Parallel()
 	fixture := newRunnerFixture(t)
@@ -13817,6 +13869,13 @@ func reviewerAutoMergeTestConfig(t *testing.T) *config.Config {
 	return &cfg
 }
 
+func reviewerAutoMergeDirectMergeTestConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := reviewerAutoMergeTestConfig(t)
+	cfg.Roles.Reviewer.AutoMerge.DirectMerge = true
+	return cfg
+}
+
 type failedReviewerRecoverySeed struct {
 	ResumePolicy         string
 	QueueErrorKind       string
@@ -13949,6 +14008,7 @@ type fakeGitHubGateway struct {
 	enableAutoMergeCalls            []githubinfra.EnableAutoMergeInput
 	removeIssueLabelCalls           []githubinfra.IssueLabelsInput
 	addIssueLabelCalls              []githubinfra.IssueLabelsInput
+	mergePullRequestCalls           []githubinfra.MergePullRequestInput
 	captureSnapshotErrs             []error
 	captureSnapshotCalls            int
 	addThreadReplyCalls             []AddReviewThreadReplyInput
@@ -14298,6 +14358,11 @@ func (g *fakeGitHubGateway) SubmitReview(_ context.Context, input githubinfra.Su
 
 func (g *fakeGitHubGateway) EnableAutoMerge(_ context.Context, input githubinfra.EnableAutoMergeInput) error {
 	g.enableAutoMergeCalls = append(g.enableAutoMergeCalls, input)
+	return nil
+}
+
+func (g *fakeGitHubGateway) MergePullRequest(_ context.Context, input githubinfra.MergePullRequestInput) error {
+	g.mergePullRequestCalls = append(g.mergePullRequestCalls, input)
 	return nil
 }
 

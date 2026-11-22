@@ -1709,6 +1709,39 @@ func (g *Gateway) EnableAutoMerge(ctx context.Context, input EnableAutoMergeInpu
 	return err
 }
 
+// MergePullRequestInput drives a direct (immediate) merge via the merge API,
+// used when GitHub's server-side auto-merge is unavailable (e.g. private repos
+// on Free/Teams-less plans). HeadSHA is optional but recommended: it pins the
+// merge to the reviewed commit.
+type MergePullRequestInput struct {
+	Repo     string
+	PRNumber int64
+	Strategy config.ReviewerAutoMergeStrategy
+	HeadSHA  string
+	CWD      string
+}
+
+func (g *Gateway) MergePullRequest(ctx context.Context, input MergePullRequestInput) error {
+	strategy := strings.TrimSpace(string(input.Strategy))
+	if strategy == "" {
+		return fmt.Errorf("merge strategy is required")
+	}
+	args := []string{"api", "-X", "PUT", fmt.Sprintf("repos/%s/pulls/%d/merge", input.Repo, input.PRNumber), "-f", "merge_method=" + strategy}
+	if sha := strings.TrimSpace(input.HeadSHA); sha != "" {
+		args = append(args, "-f", "sha="+sha)
+	}
+	result, err := g.runGh(ctx, input.CWD, "", args...)
+	if err != nil {
+		return err
+	}
+	if row, decodeErr := decodeJSONObject(result.Stdout); decodeErr == nil {
+		if merged, ok := row["merged"].(bool); ok && !merged {
+			return fmt.Errorf("direct merge not applied (%s): %s", strategy, asString(row["message"]))
+		}
+	}
+	return nil
+}
+
 func (g *Gateway) GetPullRequestHeadSHA(ctx context.Context, input ViewPullRequestInput) (string, error) {
 	result, err := g.runGh(ctx, input.CWD, "", "pr", "view", fmt.Sprintf("%d", input.PRNumber), "--repo", input.Repo, "--json", "headRefOid")
 	if err != nil {

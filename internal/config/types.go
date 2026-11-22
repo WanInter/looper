@@ -493,6 +493,12 @@ type ReviewerAutoMergeConfig struct {
 	RequireBranchProtection bool                      `json:"requireBranchProtection"`
 	TransientRetries        int                       `json:"transientRetries"`
 	Scope                   ReviewerAutoMergeScope    `json:"scope"`
+	// DirectMerge merges the PR immediately via the merge API (PUT
+	// /pulls/{n}/merge) instead of opting into GitHub's server-side auto-merge.
+	// Needed for private repos on Free/Teams-less plans, where GitHub disables
+	// the "Allow auto-merge" setting. Still gated by the automerge.Decide
+	// criteria (looper label + tracked issue + strategy allowed).
+	DirectMerge bool `json:"directMerge,omitempty"`
 }
 
 type ReviewerSkillsMode string
@@ -1033,6 +1039,7 @@ type PartialReviewerAutoMergeConfig struct {
 	RequireBranchProtection *bool                      `json:"requireBranchProtection,omitempty"`
 	TransientRetries        *int                       `json:"transientRetries,omitempty"`
 	Scope                   *ReviewerAutoMergeScope    `json:"scope,omitempty"`
+	DirectMerge             *bool                      `json:"directMerge,omitempty"`
 }
 
 type PartialInstructionsConfig struct {

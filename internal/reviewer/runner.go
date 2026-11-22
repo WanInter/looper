@@ -404,6 +404,7 @@ type GitHubGateway interface {
 	UpdateIssueComment(context.Context, UpdateIssueCommentInput) error
 	SubmitReview(context.Context, githubinfra.SubmitReviewInput) error
 	EnableAutoMerge(context.Context, githubinfra.EnableAutoMergeInput) error
+	MergePullRequest(context.Context, githubinfra.MergePullRequestInput) error
 	AddPullRequestReaction(context.Context, PullRequestReactionInput) error
 	RemovePullRequestReaction(context.Context, PullRequestReactionInput) error
 	AddPullRequestLabels(context.Context, PullRequestLabelsInput) error
@@ -6292,6 +6293,15 @@ func (r *Runner) publishCriteriaApprovedReview(ctx context.Context, input stepIn
 		return nil, err
 	}
 	if decision.Reason == "" {
+		if autoMergeCfg.DirectMerge {
+			if _, err := r.reviewerPublishFreshDetailForMutation(ctx, input, "merging"); err != nil {
+				return nil, err
+			}
+			if err := r.github.MergePullRequest(ctx, githubinfra.MergePullRequestInput{Repo: input.Repo, PRNumber: input.PRNumber, Strategy: decision.Strategy, HeadSHA: pending.HeadSHA, CWD: input.Project.RepoPath}); err != nil {
+				return nil, &loopError{message: err.Error(), kind: FailureRetryableAfterResume}
+			}
+			return &criteriaPublishResult{reviewEvent: marker.Event, marker: marker}, nil
+		}
 		if _, err := r.reviewerPublishFreshDetailForMutation(ctx, input, "enabling auto-merge"); err != nil {
 			return nil, err
 		}
@@ -6397,7 +6407,7 @@ func (r *Runner) decideAutoMerge(ctx context.Context, input stepInput, detail Pu
 		automerge.PRSnapshot{Labels: append([]string(nil), detail.Labels...), HasTrackedIssueLink: issueRef.Tracked},
 		autoMergeCfg,
 		automerge.BranchProtectionSnapshot{Exists: protection.Enabled, HasRequiredChecks: protection.HasRequiredChecks},
-		automerge.RepoSettingsSnapshot{AllowSquashMerge: settings.AllowSquashMerge, AllowMergeCommit: settings.AllowMergeCommit, AllowRebaseMerge: settings.AllowRebaseMerge, AllowAutoMerge: settings.AllowAutoMerge},
+		automerge.RepoSettingsSnapshot{AllowSquashMerge: settings.AllowSquashMerge, AllowMergeCommit: settings.AllowMergeCommit, AllowRebaseMerge: settings.AllowRebaseMerge, AllowAutoMerge: settings.AllowAutoMerge || autoMergeCfg.DirectMerge},
 	), nil
 }
 
