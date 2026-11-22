@@ -1267,6 +1267,9 @@ func mergeReviewerReviewEventsConfig(config *ReviewerReviewEventsConfig, partial
 	if partial.Blocking != nil {
 		config.Blocking = *partial.Blocking
 	}
+	if partial.AutoImplement != nil {
+		config.AutoImplement = *partial.AutoImplement
+	}
 }
 
 func mergeReviewerLoopConfig(config *ReviewerLoopConfig, partial PartialReviewerLoopConfig) {

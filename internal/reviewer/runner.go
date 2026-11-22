@@ -70,6 +70,15 @@ var reviewHumanHTMLCommentPattern = regexp.MustCompile(`(?s)<!--.*?-->`)
 var reviewHumanReferenceDefinitionPattern = regexp.MustCompile(`(?m)^\s{0,3}\[[^\]\n]+\]:[^\n]*(?:\n[ \t]+[^\n]*)*`)
 var reviewerIssueClosingReferencePattern = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+)\b`)
 
+// reviewerSpecIssueReferencePattern matches the reference the Planner writes into
+// a spec PR body ("Refs #N", also tolerating Closes/Fixes/Resolves) so the
+// spec-ready transition can find the issue to hand off for implementation.
+var reviewerSpecIssueReferencePattern = regexp.MustCompile(`(?i)\b(?:refs?|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+)\b`)
+
+// reviewerPlannerBranchPattern extracts the issue number from a Planner branch
+// name such as "looper/planner/21-p2-wal-checkpoint" as a fallback.
+var reviewerPlannerBranchPattern = regexp.MustCompile(`^looper/planner/(\d+)(?:$|[-/._])`)
+
 const (
 	reviewerNativeResumeMetadataKey      = "reviewerNativeResume"
 	reviewerNativeResumeReasonHeadChange = "head_change"
@@ -400,6 +409,7 @@ type GitHubGateway interface {
 	AddPullRequestLabels(context.Context, PullRequestLabelsInput) error
 	RemovePullRequestLabels(context.Context, PullRequestLabelsInput) error
 	RemoveIssueLabels(context.Context, githubinfra.IssueLabelsInput) error
+	AddIssueLabels(context.Context, githubinfra.IssueLabelsInput) error
 	ListReviewThreads(context.Context, ListReviewThreadsInput) ([]ReviewThread, error)
 	AddReviewThreadReply(context.Context, AddReviewThreadReplyInput) error
 	ResolveReviewThread(context.Context, ResolveReviewThreadInput) error
@@ -6098,6 +6108,68 @@ func (r *Runner) applyCleanSpecLabelTransition(ctx context.Context, input stepIn
 	if !specpr.HasLabel(freshDetail.Labels, specpr.ReadyLabel) {
 		if err := r.github.AddPullRequestLabels(ctx, PullRequestLabelsInput{Repo: input.Repo, PRNumber: input.PRNumber, Labels: []string{specpr.ReadyLabel}, CWD: input.Project.RepoPath}); err != nil {
 			return &loopError{message: fmt.Sprintf("Failed to add spec-ready label before marking publish success: %v", err), kind: FailureRetryableAfterResume}
+		}
+	}
+	if r.effectiveReviewEvents(input.Project.ID, input.Loop.MetadataJSON).AutoImplement {
+		if err := r.handoffSpecReadyForImplementation(ctx, input, freshDetail); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// specReady* labels: on a clean spec-ready transition, hand the linked issue
+// off for implementation by ensuring it carries dispatch/implement (so the
+// Coordinator admits a Worker) and dropping the now-obsolete plan labels.
+const (
+	specReadyImplementLabel   = "dispatch/implement"
+	specReadyPlanLabel        = "dispatch/plan"
+	specReadyPlanTriggerLabel = "looper:plan"
+)
+
+func parseSpecLinkedIssue(defaultRepo, body, headRef string) (linkedIssueReference, bool) {
+	if match := reviewerSpecIssueReferencePattern.FindStringSubmatch(body); len(match) == 2 {
+		if repo, number, ok := splitIssueReference(defaultRepo, strings.TrimSpace(match[1])); ok {
+			return linkedIssueReference{Repo: repo, Number: number}, true
+		}
+	}
+	if match := reviewerPlannerBranchPattern.FindStringSubmatch(strings.TrimSpace(headRef)); len(match) == 2 {
+		if number, err := parseInt64(match[1]); err == nil && number > 0 {
+			return linkedIssueReference{Repo: defaultRepo, Number: number}, true
+		}
+	}
+	return linkedIssueReference{}, false
+}
+
+func (r *Runner) handoffSpecReadyForImplementation(ctx context.Context, input stepInput, detail PullRequestDetail) error {
+	issueRef, ok := parseSpecLinkedIssue(input.Repo, detail.Body, detail.HeadRefName)
+	if !ok {
+		return nil
+	}
+	freshIssue, err := r.github.ViewIssue(ctx, githubinfra.ViewIssueInput{Repo: issueRef.Repo, IssueNumber: issueRef.Number, CWD: input.Project.RepoPath})
+	if err != nil {
+		if linkedIssueLookupUnavailable(err) {
+			return nil
+		}
+		return &loopError{message: fmt.Sprintf("Failed to view linked issue %s#%d for spec-ready handoff: %v", issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
+	}
+	if freshIssue.IsPullRequest {
+		return nil
+	}
+	if !specpr.HasLabel(freshIssue.Labels, specReadyImplementLabel) {
+		if err := r.github.AddIssueLabels(ctx, githubinfra.IssueLabelsInput{Repo: issueRef.Repo, IssueNumber: issueRef.Number, Labels: []string{specReadyImplementLabel}, CWD: input.Project.RepoPath}); err != nil {
+			return &loopError{message: fmt.Sprintf("Failed to add %s to issue %s#%d for spec-ready handoff: %v", specReadyImplementLabel, issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
+		}
+	}
+	remove := make([]string, 0, 2)
+	for _, label := range []string{specReadyPlanLabel, specReadyPlanTriggerLabel} {
+		if specpr.HasLabel(freshIssue.Labels, label) {
+			remove = append(remove, label)
+		}
+	}
+	if len(remove) > 0 {
+		if err := r.github.RemoveIssueLabels(ctx, githubinfra.IssueLabelsInput{Repo: issueRef.Repo, IssueNumber: issueRef.Number, Labels: remove, CWD: input.Project.RepoPath}); err != nil {
+			return &loopError{message: fmt.Sprintf("Failed to remove %v from issue %s#%d for spec-ready handoff: %v", remove, issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
 		}
 	}
 	return nil

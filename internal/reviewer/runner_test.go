@@ -5632,6 +5632,83 @@ func TestProcessClaimedItemTransitionsSpecLabelsForCleanNoopCommentPolicy(t *tes
 	}
 }
 
+func TestProcessClaimedItemHandsOffSpecToImplementationWhenAutoImplement(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	github := &fakeGitHubGateway{
+		labels:              []string{specpr.ReviewingLabel},
+		reviewRequests:      []string{"octocat"},
+		reviewMarkerMissing: true,
+		viewBody:            "Refs #21\n\nspec",
+		issueDetail:         githubinfra.IssueDetail{Number: 21, Title: "Issue", State: "open", Labels: []string{"triaged", "dispatch/plan", "looper:plan"}},
+	}
+	agent := &fakeAgentExecutor{results: []AgentResult{{Status: "completed", Summary: "No actionable findings; added clean signal", Stdout: `__LOOPER_RESULT__={"summary":"No actionable findings; added clean signal"}`, ParseStatus: "parsed"}}}
+	runner := New(Options{DB: fixture.coordinator.DB(), Repos: fixture.repos, GitHub: github, Git: &fakeGitGateway{}, AgentExecutor: agent, Logger: fixture.logger, Now: fixture.now, AllowAutoApprove: true, ReviewEvents: config.ReviewerReviewEventsConfig{Clean: config.ReviewerReviewEventComment, AutoImplement: true}, LoopConfig: config.ReviewerLoopConfig{EnabledByDefault: true, QuietPeriodSeconds: 120, MaxIterationsPerPR: 20, MaxIterationsPerHead: 2, MaxWallClockSeconds: 14400, MaxConsecutiveFailures: 3, MaxAgentExecutionsPerPR: 25}})
+	ctx := context.Background()
+	nowISO := fixture.nowISO()
+	repo := "acme/looper"
+	prNumber := int64(42)
+	metadata := `{"followUpdates":true,"loop":{"enabled":true}}`
+	loop := storage.LoopRecord{ID: "loop_auto_implement_spec", Seq: 1, ProjectID: "project_1", Type: "reviewer", TargetType: "pull_request", Repo: &repo, PRNumber: &prNumber, Status: "queued", MetadataJSON: &metadata, CreatedAt: nowISO, UpdatedAt: nowISO}
+	if err := fixture.repos.Loops.Upsert(ctx, loop); err != nil {
+		t.Fatalf("Loops.Upsert() error = %v", err)
+	}
+	queue, err := runner.enqueue(ctx, enqueueInput{ProjectID: "project_1", LoopID: loop.ID, Repo: repo, PRNumber: prNumber})
+	if err != nil {
+		t.Fatalf("enqueue() error = %v", err)
+	}
+	claimed, err := fixture.repos.Queue.ClaimNextOfType(ctx, fixture.nowISO(), "reviewer-worker-1", "reviewer")
+	if err != nil || claimed == nil || claimed.ID != queue.ID {
+		t.Fatalf("ClaimNextOfType() = (%#v, %v), want queued item %s", claimed, err, queue.ID)
+	}
+	result, err := runner.ProcessClaimedItem(ctx, *claimed)
+	if err != nil {
+		t.Fatalf("ProcessClaimedItem() error = %v", err)
+	}
+	if result.Status != "success" {
+		t.Fatalf("result = %#v, want success", result)
+	}
+	if len(github.addIssueLabelCalls) != 1 || len(github.addIssueLabelCalls[0].Labels) != 1 || github.addIssueLabelCalls[0].Labels[0] != "dispatch/implement" || github.addIssueLabelCalls[0].IssueNumber != 21 {
+		t.Fatalf("addIssueLabelCalls = %#v, want dispatch/implement on #21", github.addIssueLabelCalls)
+	}
+	if len(github.removeIssueLabelCalls) != 1 {
+		t.Fatalf("removeIssueLabelCalls = %#v, want one issue-label removal", github.removeIssueLabelCalls)
+	}
+	if got := github.removeIssueLabelCalls[0]; got.IssueNumber != 21 || len(got.Labels) != 2 || got.Labels[0] != "dispatch/plan" || got.Labels[1] != "looper:plan" {
+		t.Fatalf("removeIssueLabelCalls[0] = %#v, want dispatch/plan+looper:plan removed from #21", got)
+	}
+}
+
+func TestParseSpecLinkedIssue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		body   string
+		head   string
+		want   linkedIssueReference
+		wantOK bool
+	}{
+		{name: "refs", body: "Refs #21", want: linkedIssueReference{Repo: "acme/looper", Number: 21}, wantOK: true},
+		{name: "refs cross repo", body: "Refs acme/other#7", want: linkedIssueReference{Repo: "acme/other", Number: 7}, wantOK: true},
+		{name: "closes", body: "Closes #9", want: linkedIssueReference{Repo: "acme/looper", Number: 9}, wantOK: true},
+		{name: "branch fallback", head: "looper/planner/33-p1-foo", want: linkedIssueReference{Repo: "acme/looper", Number: 33}, wantOK: true},
+		{name: "none", body: "no reference here", wantOK: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseSpecLinkedIssue("acme/looper", tc.body, tc.head)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("got = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProcessClaimedItemAutoMergeApprovesAndEnablesAutoMergeWhenCriteriaPass(t *testing.T) {
 	t.Parallel()
 	fixture := newRunnerFixture(t)
@@ -13871,6 +13948,7 @@ type fakeGitHubGateway struct {
 	submitReviewCalls               []githubinfra.SubmitReviewInput
 	enableAutoMergeCalls            []githubinfra.EnableAutoMergeInput
 	removeIssueLabelCalls           []githubinfra.IssueLabelsInput
+	addIssueLabelCalls              []githubinfra.IssueLabelsInput
 	captureSnapshotErrs             []error
 	captureSnapshotCalls            int
 	addThreadReplyCalls             []AddReviewThreadReplyInput
@@ -14263,6 +14341,11 @@ func (g *fakeGitHubGateway) RemovePullRequestLabels(_ context.Context, input Pul
 
 func (g *fakeGitHubGateway) RemoveIssueLabels(_ context.Context, input githubinfra.IssueLabelsInput) error {
 	g.removeIssueLabelCalls = append(g.removeIssueLabelCalls, input)
+	return nil
+}
+
+func (g *fakeGitHubGateway) AddIssueLabels(_ context.Context, input githubinfra.IssueLabelsInput) error {
+	g.addIssueLabelCalls = append(g.addIssueLabelCalls, input)
 	return nil
 }
 

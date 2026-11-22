@@ -88,6 +88,7 @@ var hotEditablePaths = map[string]struct{}{
 	"roles.reviewer.behavior.publishMode":                                  {},
 	"roles.reviewer.behavior.reviewEvents.clean":                           {},
 	"roles.reviewer.behavior.reviewEvents.blocking":                        {},
+	"roles.reviewer.behavior.reviewEvents.autoImplement":                   {},
 	"roles.reviewer.behavior.detectDuplicateFindings":                      {},
 	"roles.reviewer.behavior.nativeResume.onHeadChange":                    {},
 	"roles.reviewer.behavior.nativeResume.reReviewPromptOnHeadChange":      {},

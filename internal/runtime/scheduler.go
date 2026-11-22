@@ -1885,6 +1885,19 @@ func (a reviewerGitHubAdapter) RemoveIssueLabels(ctx context.Context, input gith
 	return a.gateway.RemoveIssueLabels(ctx, input)
 }
 
+func (a reviewerGitHubAdapter) AddIssueLabels(ctx context.Context, input githubinfra.IssueLabelsInput) error {
+	if client, ok, err := a.forgejo(ctx, input.Repo, input.CWD); ok || err != nil {
+		if err != nil {
+			return err
+		}
+		if _, err := client.AddIssueLabels(ctx, input.IssueNumber, input.Labels); err != nil {
+			return err
+		}
+		return nil
+	}
+	return a.gateway.AddIssueLabels(ctx, input)
+}
+
 func (a reviewerGitHubAdapter) ListReviewThreads(ctx context.Context, input reviewer.ListReviewThreadsInput) ([]reviewer.ReviewThread, error) {
 	if _, ok, err := a.forgejo(ctx, input.Repo, input.CWD); ok || err != nil {
 		if err != nil {

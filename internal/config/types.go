@@ -464,6 +464,11 @@ type ReviewerRetryConfig struct {
 type ReviewerReviewEventsConfig struct {
 	Clean    ReviewerReviewEvent `json:"clean"`
 	Blocking ReviewerReviewEvent `json:"blocking"`
+	// AutoImplement: when a clean spec review promotes the PR to
+	// looper:spec-ready, also flip the linked issue's dispatch label from
+	// dispatch/plan to dispatch/implement, so the Coordinator dispatches a
+	// Worker to implement the spec without a manual step.
+	AutoImplement bool `json:"autoImplement,omitempty"`
 }
 
 type ReviewerNativeResumeConfig struct {
@@ -1001,8 +1006,9 @@ type PartialReviewerRetryConfig struct {
 }
 
 type PartialReviewerReviewEventsConfig struct {
-	Clean    *ReviewerReviewEvent `json:"clean,omitempty"`
-	Blocking *ReviewerReviewEvent `json:"blocking,omitempty"`
+	Clean         *ReviewerReviewEvent `json:"clean,omitempty"`
+	Blocking      *ReviewerReviewEvent `json:"blocking,omitempty"`
+	AutoImplement *bool                `json:"autoImplement,omitempty"`
 }
 
 type PartialReviewerNativeResumeConfig struct {
