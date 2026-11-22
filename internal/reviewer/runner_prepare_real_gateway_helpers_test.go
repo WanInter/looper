@@ -99,6 +99,7 @@ func (g *countingRealGitGateway) PrepareWorktree(ctx context.Context, input Prep
 	res, err := g.inner.PrepareWorktree(ctx, gitinfra.PrepareWorktreeInput{
 		RepoPath: input.RepoPath, WorktreeRoot: input.WorktreeRoot, WorktreePath: input.WorktreePath,
 		Branch: input.Branch, Ref: input.Ref, ExpectedHeadSHA: input.ExpectedHeadSHA, BaseSHA: input.BaseSHA, Remote: input.Remote,
+		PreserveLocalHead: input.PreserveLocalHead,
 	})
 	if err != nil {
 		return PrepareWorktreeResult{}, err

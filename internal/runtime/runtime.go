@@ -171,6 +171,7 @@ type Runtime struct {
 	startErr                    error
 	startOnce                   sync.Once
 	shutdownOnce                sync.Once
+	beginShutdownOnce           sync.Once
 	shutdownCh                  chan struct{}
 	schedulerStop               chan struct{}
 	schedulerDone               chan struct{}
@@ -477,6 +478,10 @@ func (r *Runtime) BeginShutdown(reason string) {
 	if r == nil {
 		return
 	}
+	r.beginShutdownOnce.Do(func() { r.beginShutdown(reason) })
+}
+
+func (r *Runtime) beginShutdown(reason string) {
 	// Snapshot cancel targets under r.mu first, then flip stopping + invoke
 	// cancels under admission.mu. Do not take r.mu while holding admission.mu
 	// (other paths lock r.mu then read admission — that order would deadlock).
@@ -2063,7 +2068,10 @@ func (r *Runtime) runRecoveryPipeline(ctx context.Context, repositories *storage
 			eventsWritten += 1
 			continue
 		}
-		if shouldRequeueLoop(loop, latestRun, latestRunHasActiveAgent || latestRunHasUncertainAgent) {
+		// A previous startup (or cancelled-claim finalizer) may already have
+		// queued this interruption. Preserve its schedule and retry counters.
+		alreadyQueued := loop.Status == "queued" && latestQueue != nil && latestQueue.Status == "queued"
+		if !alreadyQueued && shouldRequeueLoop(loop, latestRun, latestRunHasActiveAgent || latestRunHasUncertainAgent) {
 			requeuedLoop := loop
 			requeuedLoop.Status = "queued"
 			requeuedLoop.NextRunAt = stringPtr(nowISO)

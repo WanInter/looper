@@ -25,6 +25,9 @@ type SpawnMeta struct {
 	LoopID      string
 	RunID       string
 	ExecutionID string
+	// WaitFinalized joins the executor, not the caller's cancellable Wait.
+	// A successful spawn finishes only after containment and terminal persistence.
+	WaitFinalized func(context.Context) error
 }
 
 // SoftKillFunc notifies a running agent execution of an external stop so status

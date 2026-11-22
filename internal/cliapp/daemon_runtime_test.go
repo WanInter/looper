@@ -419,7 +419,7 @@ func TestGenerateLaunchdPlistRestartPolicyMapping(t *testing.T) {
 				t.Fatalf("generateLaunchdPlist() error = %v", err)
 			}
 			got := string(plist)
-			for _, want := range []string{"<key>Label</key>", launchdLooperdLabel, "<key>ProgramArguments</key>", "<key>RunAtLoad</key>", "<key>ThrottleInterval</key>", "<integer>10</integer>", "<key>StandardOutPath</key>", "<key>StandardErrorPath</key>"} {
+			for _, want := range []string{"<key>Label</key>", launchdLooperdLabel, "<key>ProgramArguments</key>", "<key>RunAtLoad</key>", "<key>ThrottleInterval</key>", "<integer>10</integer>", "<key>ExitTimeOut</key>\n\t<integer>158</integer>", "<key>StandardOutPath</key>", "<key>StandardErrorPath</key>"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("plist missing %q:\n%s", want, got)
 				}

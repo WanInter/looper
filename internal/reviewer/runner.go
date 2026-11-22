@@ -214,14 +214,15 @@ type CreateWorktreeResult struct {
 }
 
 type PrepareWorktreeInput struct {
-	RepoPath        string
-	WorktreeRoot    string
-	WorktreePath    string
-	Branch          string
-	Ref             string
-	ExpectedHeadSHA string
-	BaseSHA         string
-	Remote          string
+	RepoPath          string
+	WorktreeRoot      string
+	WorktreePath      string
+	Branch            string
+	Ref               string
+	ExpectedHeadSHA   string
+	BaseSHA           string
+	Remote            string
+	PreserveLocalHead bool
 }
 
 type PrepareWorktreeResult struct {
@@ -3506,6 +3507,7 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 	if err != nil {
 		return checkpoint, err
 	}
+	var resumePath string
 	if checkpoint.Worktree != nil {
 		if err := worktreesafety.Validate(worktreesafety.CheckInput{WorktreePath: checkpoint.Worktree.Path, RepoPath: input.Project.RepoPath, WorktreeRoot: worktreeRoot}); err != nil {
 			checkpoint.Worktree = nil
@@ -3519,6 +3521,8 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 				return checkpoint, err
 			}
 			return checkpoint, nil
+		} else if !reviewerWorktreeNeedsPrepare(checkpoint) && checkpoint.Worktree.HeadSHA != "" && checkpoint.Worktree.HeadSHA == checkpoint.Snapshot.HeadSHA {
+			resumePath = checkpoint.Worktree.Path
 		}
 	}
 	protectedBranches := make([]string, 0, 2)
@@ -3533,6 +3537,12 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 		return checkpoint, err
 	}
 	checkpoint.Worktree = &checkpointWorktree{Path: created.WorktreePath, Branch: branch, BaseBranch: baseBranch}
+	preserveLocalHead := resumePath != "" && filepath.Clean(resumePath) == filepath.Clean(created.WorktreePath)
+	if preserveLocalHead {
+		// Keep the expected head even if cancellation or manual intervention
+		// interrupts this preparation; a second retry must not reset it either.
+		checkpoint.Worktree.HeadSHA = checkpoint.Snapshot.HeadSHA
+	}
 	if input.Run.ID != "" {
 		step := asReviewerStep(derefString(input.Run.CurrentStep))
 		if step == "" {
@@ -3559,7 +3569,7 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 		}
 		return checkpoint, err
 	}
-	prepared, err := r.git.PrepareWorktree(ctx, PrepareWorktreeInput{RepoPath: input.Project.RepoPath, WorktreeRoot: worktreeRoot, WorktreePath: created.WorktreePath, Branch: branch, Ref: prRef, ExpectedHeadSHA: checkpoint.Snapshot.HeadSHA, BaseSHA: firstNonEmpty(checkpoint.Snapshot.BaseSHA, checkpoint.Detail.BaseSHA)})
+	prepared, err := r.git.PrepareWorktree(ctx, PrepareWorktreeInput{RepoPath: input.Project.RepoPath, WorktreeRoot: worktreeRoot, WorktreePath: created.WorktreePath, Branch: branch, Ref: prRef, ExpectedHeadSHA: checkpoint.Snapshot.HeadSHA, BaseSHA: firstNonEmpty(checkpoint.Snapshot.BaseSHA, checkpoint.Detail.BaseSHA), PreserveLocalHead: preserveLocalHead})
 	if err != nil {
 		if restoreErr := restoreFixerOwnerToken(created.WorktreePath, priorFixerToken); restoreErr != nil {
 			// Do not continue with cleared-but-unrestored ownership: a later fixer
@@ -3570,6 +3580,9 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 		if errors.As(err, &remoteHeadChanged) {
 			return markReviewerRunStale(checkpoint, remoteHeadChanged.Error()), nil
 		}
+		if errors.Is(err, gitinfra.ErrLocalWorktreeHeadChanged) {
+			return checkpoint, &loopError{message: fmt.Sprintf("Reviewer worktree at %s: %v; local commits were preserved, manual intervention required", created.WorktreePath, err), kind: FailureManualIntervention}
+		}
 		return checkpoint, err
 	}
 	if !prepared.Clean {
@@ -3578,7 +3591,7 @@ func (r *Runner) runPrepareWorktreeStep(ctx context.Context, input stepInput) (r
 		if restoreErr := restoreFixerOwnerToken(created.WorktreePath, priorFixerToken); restoreErr != nil {
 			return checkpoint, fmt.Errorf("restore fixer owner token after dirty prepare: %w", restoreErr)
 		}
-		return checkpoint, &loopError{message: fmt.Sprintf("Reviewer worktree is dirty for branch %s; manual intervention required", branch), kind: FailureManualIntervention}
+		return checkpoint, &loopError{message: fmt.Sprintf("Reviewer worktree is dirty for branch %s at %s; local edits were preserved, manual intervention required", branch, created.WorktreePath), kind: FailureManualIntervention}
 	}
 	checkpoint.Worktree.HeadSHA = prepared.HeadSHA
 	checkpoint.Worktree.PreparedAt = r.nowISO()

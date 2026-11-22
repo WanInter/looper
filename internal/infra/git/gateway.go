@@ -76,7 +76,12 @@ type PrepareWorktreeInput struct {
 	ExpectedHeadSHA string
 	BaseSHA         string
 	Remote          string
+	// PreserveLocalHead refuses to reset a resumed checkout whose local HEAD
+	// diverged from the expected PR head, even if its index is clean.
+	PreserveLocalHead bool
 }
+
+var ErrLocalWorktreeHeadChanged = errors.New("local worktree HEAD changed")
 
 type PrepareWorktreeResult struct {
 	HeadSHA string
@@ -744,6 +749,9 @@ func (g *Gateway) PrepareWorktree(ctx context.Context, input PrepareWorktreeInpu
 		return PrepareWorktreeResult{}, err
 	}
 	if remoteHeadSHA != "" && localHeadSHA != remoteHeadSHA {
+		if input.PreserveLocalHead {
+			return PrepareWorktreeResult{}, fmt.Errorf("%w: expected %s, found %s", ErrLocalWorktreeHeadChanged, remoteHeadSHA, localHeadSHA)
+		}
 		if err := g.runGit(ctx, input.WorktreePath, nil, "reset", "--hard", resetRef); err != nil {
 			return PrepareWorktreeResult{}, err
 		}

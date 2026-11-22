@@ -480,6 +480,13 @@ func (e *ConfiguredExecutor) Start(ctx context.Context, input RunInput) (Executi
 	startedAt := e.now().UTC()
 	startedAtISO := eventlog.FormatJavaScriptISOString(startedAt)
 	cfg := e.effectiveConfig(input)
+	if cfg.Vendor == config.AgentVendorOpenCode {
+		for _, arg := range stringArgs(cfg.Params["args"]) {
+			if hasAnyFlag([]string{arg}, []string{"--server", "--attach"}) || strings.HasPrefix(arg, "--standalone=") {
+				return nil, fmt.Errorf("OpenCode agent execution requires a private server; use --standalone without --server or --attach")
+			}
+		}
+	}
 	resume, err := e.resolveNativeResume(ctx, input)
 	if err != nil {
 		return nil, err
@@ -488,16 +495,33 @@ func (e *ConfiguredExecutor) Start(ctx context.Context, input RunInput) (Executi
 	// Supervisor lease before cmd.Start (#576). When Owner is nil (unit tests),
 	// containment still binds but there is no live registry entry for stop.
 	var lease SpawnLease
+	var finalized chan struct{}
+	var finalErr error
 	if e.owner != nil {
+		finalized = make(chan struct{})
 		lease, err = e.owner.AdmitSpawn(ctx, SpawnMeta{
 			LoopID:      input.LoopID,
 			RunID:       input.RunID,
 			ExecutionID: executionID,
+			WaitFinalized: func(ctx context.Context) error {
+				select {
+				case <-finalized:
+					return finalErr
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
 		})
 		if err != nil {
 			return nil, err
 		}
 	}
+	transferred := false
+	defer func() {
+		if finalized != nil && !transferred {
+			close(finalized)
+		}
+	}()
 	releaseLease := func() {
 		if lease != nil {
 			lease.Release()
@@ -645,6 +669,7 @@ func (e *ConfiguredExecutor) Start(ctx context.Context, input RunInput) (Executi
 	// deferred Release still drains Supervisor ownership when reap confirms dead.
 	if err := x.persistStatus(ctx, "running", nil, nil, nil); err != nil {
 		outErr := x.reapOnOwnershipPersistFailure(cmd, grace, err, "persist initial agent execution ownership")
+		finalErr = outErr
 		// When Kill cannot confirm death, keep the registry handle: dropping the
 		// lease here would leave a still-live agent with neither a durable row
 		// nor an owner (Start returns no Execution).
@@ -656,12 +681,18 @@ func (e *ConfiguredExecutor) Start(ctx context.Context, input RunInput) (Executi
 
 	// Transfer lease ownership to execution; defer must not Release on success.
 	lease = nil
+	transferred = true
 	hostingTransferred = true
 
 	resumeSessionID, resumeMode, resumeStatus, _ := x.nativeResumeSnapshot()
 	e.appendLifecycleEvent("agent.invoked", input, executionID, map[string]any{"command": command, "args": args, "cwd": input.WorkingDirectory, "nativeResumeMode": resumeMode, "nativeResumeStatus": resumeStatus, "nativeSessionId": resumeSessionID}, startedAtISO)
 
-	go x.run(ctx)
+	go func() {
+		finalErr = x.run(ctx)
+		if finalized != nil {
+			close(finalized)
+		}
+	}()
 	return x, nil
 }
 
@@ -813,7 +844,7 @@ func (x *execution) waitLeader() error {
 	return x.process.Wait()
 }
 
-func (x *execution) run(ctx context.Context) {
+func (x *execution) run(ctx context.Context) error {
 	defer x.releaseLease()
 	defer x.closeHosting()
 
@@ -879,6 +910,7 @@ func (x *execution) run(ctx context.Context) {
 		defer inactivityTimer.Stop()
 	}
 
+	cancelled := runCtx.Done()
 	waiting := true
 	for waiting {
 		select {
@@ -926,7 +958,8 @@ func (x *execution) run(ctx context.Context) {
 			killReason = reason
 			x.setStatus("killed")
 			terminateSignal()
-		case <-runCtx.Done():
+		case <-cancelled:
+			cancelled = nil
 			killed = true
 			if killReason == "" {
 				if runCtx.Err() != nil {
@@ -940,6 +973,13 @@ func (x *execution) run(ctx context.Context) {
 		case <-graceKillTimer:
 			graceKillTimer = nil
 			_ = x.killProcessGroup()
+		}
+	}
+	// Leader exit can win the select while shutdown is already cancelling us.
+	if runCtx.Err() != nil || (x.lease != nil && x.lease.Context().Err() != nil) {
+		killed = true
+		if killReason == "" {
+			killReason = context.Canceled.Error()
 		}
 	}
 	if termDelivered && (killed || timedOut) {
@@ -1016,7 +1056,7 @@ func (x *execution) run(ctx context.Context) {
 				// Fallback ownership persist failed; process reaped only when
 				// Kill confirmed dead (releaseLease keeps ownership otherwise).
 				x.doneCh <- execOutcome{result: result, err: fallbackErr}
-				return
+				return fallbackErr
 			}
 		}
 	}
@@ -1025,11 +1065,12 @@ func (x *execution) run(ctx context.Context) {
 	// executions (ties to #574/#576 / ADR-0015 R5).
 	if err := x.ensureConfirmedDeadBeforeTerminal(); err != nil {
 		x.reportHardPersistFailure(err)
+		finalErr := errors.Join(ErrExecutionPersistence, fmt.Errorf("containment not confirmed dead before terminal observation: %w", err))
 		x.doneCh <- execOutcome{
 			result: result,
-			err:    errors.Join(ErrExecutionPersistence, fmt.Errorf("containment not confirmed dead before terminal observation: %w", err)),
+			err:    finalErr,
 		}
-		return
+		return finalErr
 	}
 
 	persistErr := x.persistFinal(status, result, errorMessage, endedAtISO)
@@ -1069,6 +1110,7 @@ func (x *execution) run(ctx context.Context) {
 	}
 
 	x.doneCh <- execOutcome{result: result, err: persistErr}
+	return persistErr
 }
 
 func (x *execution) shouldFallbackNativeResume(status string, stdout string, stderr string) bool {
@@ -2099,6 +2141,9 @@ func resolveOpenCodeArgs(cfg ExecutorConfig, args []string, workingDirectory str
 	// already sets to the worktree). Passing --dir fails every run.
 	_ = workingDirectory
 	withModel := prependModelFlag(resolved, cfg.Model, "--model", []string{"--model", "-m"})
+	// OpenCode v2 otherwise hands tool execution to a shared background service
+	// outside our process group. Do not stop or adopt that service.
+	withModel = append([]string{"--standalone"}, removeFirstArg(withModel, "--standalone")...)
 	if hasAnyFlag(withModel, []string{"-p", "--prompt", "-f", "--file"}) {
 		return withModel
 	}
@@ -2207,19 +2252,10 @@ func resolveNativeResumeArgs(cfg ExecutorConfig, workingDirectory string, args [
 		}
 		return append(base, prompt)
 	case config.AgentVendorOpenCode:
-		resolved := prependModelFlag(args, cfg.Model, "--model", []string{"--model", "-m"})
-		if !containsArg(resolved, "run") {
-			resolved = append([]string{"run"}, resolved...)
+		if !hasAnyFlag(args, []string{"--session", "--continue"}) {
+			args = append(append([]string{}, args...), "--session", sessionID)
 		}
-		// opencode v2+ has no --dir flag (uses the process cwd; looper sets cmd.Dir to the worktree).
-		_ = workingDirectory
-		if !hasAnyFlag(resolved, []string{"--session", "--continue"}) {
-			resolved = append(resolved, "--session", sessionID)
-		}
-		if !hasAnyFlag(resolved, []string{"-p", "--prompt", "-f", "--file"}) {
-			resolved = append(resolved, prompt)
-		}
-		return resolved
+		return resolveOpenCodeArgs(cfg, args, workingDirectory, prompt)
 	case config.AgentVendorCursorCLI:
 		resolved := prependModelFlag(args, cfg.Model, "--model", []string{"--model"})
 		if !hasAnyFlag(resolved, []string{"--continue", "--resume"}) {
