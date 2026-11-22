@@ -33,6 +33,8 @@
 - **修法**（`autoImplement=true` 时）：clean spec 评审把 PR 转 `spec-ready` 的同时，解析关联 issue（PR body 的 `Refs/Closes #N`，或分支名 `looper/planner/<N>-…`）→ 给 issue **加 `dispatch/implement`**、**删 `dispatch/plan` 与 `looper:plan`** → 自主 Coordinator 自动派 Worker 实现，**真正闭环**。
 - **配置**：`[roles.reviewer.behavior.reviewEvents] autoImplement = true`（默认 false；已在本机开启）。
 - **文件**：`internal/config/{types,normalize,hot_reload}.go`、`internal/reviewer/runner.go`（+ 单测）、`internal/runtime/scheduler.go`（适配器补 `AddIssueLabels`）。
+- **补充 `76c00b0`**：交接时**同时加 `looper:worker-ready`**（Worker 的真实发现触发标签）——因为 Coordinator 的 `decideAutonomous` 还要求 issue 有 `triaged`，spec 类 issue 常缺该标签，直接加 `looper:worker-ready` 可让 Worker 立刻实现、不依赖 Coordinator 闸门。
+- **活体验证**：spec PR #62 clean → 转 `spec-ready`，关联 issue **#21** 标签由 `['looper:plan']` → `['dispatch/implement','looper:worker-ready']`；`looper work --issue 21` → **Worker 启动**（"Implement specs/2026-11-22-21-p2-wal-checkpoint.md"，loop #65 `execute` running）✅
 
 ---
 
