@@ -6263,6 +6263,9 @@ func (r *Runner) publishCleanReviewWithoutCriteria(ctx context.Context, input st
 		if err := r.applyCleanNoopReviewSideEffects(ctx, input, checkpoint, detail); err != nil {
 			return nil, err
 		}
+		if err := r.maybeAutoMergeCleanReview(ctx, input, checkpoint, pending, detail); err != nil {
+			return nil, err
+		}
 		return &criteriaPublishResult{reviewEvent: ReviewEventComment, recordOnly: true}, nil
 	}
 	body := stampReviewBody(r.disclosure, buildCleanApprovalBody(cleanReviewAuthorLogin(checkpoint, detail), criteriaVerificationHeading, nil, "No explicit acceptance criteria were stated on the linked issue, so this review follows the standard clean-review path."), "reviewer")
@@ -6273,7 +6276,54 @@ func (r *Runner) publishCleanReviewWithoutCriteria(ctx context.Context, input st
 	if err := r.applyVerifiedReviewSideEffects(ctx, input, checkpoint, detail, marker); err != nil {
 		return nil, err
 	}
+	if err := r.maybeAutoMergeCleanReview(ctx, input, checkpoint, pending, detail); err != nil {
+		return nil, err
+	}
 	return &criteriaPublishResult{reviewEvent: marker.Event, marker: marker}, nil
+}
+
+// maybeAutoMergeCleanReview opts a clean, non-spec pull request into auto-merge
+// (or performs a direct merge when autoMerge.directMerge is set). It mirrors the
+// criteria-approval auto-merge for the plain clean-review path, where the linked
+// issue carries no acceptance criteria. Refusals post an explanatory comment;
+// only a failed enable/merge call surfaces as a retryable error.
+func (r *Runner) maybeAutoMergeCleanReview(ctx context.Context, input stepInput, checkpoint reviewerCheckpoint, pending pendingReviewCheckpoint, detail PullRequestDetail) error {
+	cfg := r.reviewerAutoMergeConfigForProject(input.Project.ID)
+	if !cfg.Enabled {
+		return nil
+	}
+	if resolvePullRequestPhase(detail.Labels) == "spec" {
+		return nil
+	}
+	issueRef, _, ok, err := r.resolveLinkedIssueForCriteria(ctx, input, detail)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	decision, err := r.decideAutoMerge(ctx, input, detail, cfg, issueRef)
+	if err != nil {
+		return err
+	}
+	if decision.Reason != "" {
+		return r.postStampedPRCommentIfMissing(ctx, input, detail, autoMergeRefusedCommentMarker, fmt.Sprintf("Auto-merge opt-in was refused for this PR: %s.", decision.Reason))
+	}
+	if _, err := r.reviewerPublishFreshDetailForMutation(ctx, input, "merging"); err != nil {
+		return err
+	}
+	if cfg.DirectMerge {
+		if err := r.github.MergePullRequest(ctx, githubinfra.MergePullRequestInput{Repo: input.Repo, PRNumber: input.PRNumber, Strategy: decision.Strategy, HeadSHA: pending.HeadSHA, CWD: input.Project.RepoPath}); err != nil {
+			return &loopError{message: err.Error(), kind: FailureRetryableAfterResume}
+		}
+		return nil
+	}
+	if err := r.github.EnableAutoMerge(ctx, githubinfra.EnableAutoMergeInput{Repo: input.Repo, PRNumber: input.PRNumber, Strategy: decision.Strategy, HeadSHA: pending.HeadSHA, CWD: input.Project.RepoPath}); err != nil {
+		if r.forgejoProject(input.Project.ID) || !isAlreadyEnabledAutoMergeError(err) {
+			return &loopError{message: err.Error(), kind: FailureRetryableAfterResume}
+		}
+	}
+	return nil
 }
 
 func (r *Runner) publishCriteriaApprovedReview(ctx context.Context, input stepInput, checkpoint reviewerCheckpoint, pending pendingReviewCheckpoint, detail PullRequestDetail, autoMergeCfg config.ReviewerAutoMergeConfig, issueRef linkedIssueReference, verification criteria.VerificationResult) (*criteriaPublishResult, error) {
