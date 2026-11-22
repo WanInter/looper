@@ -6051,7 +6051,14 @@ func (r *Runner) clearInProgressReactionIfQueueStopped(ctx context.Context, proj
 }
 
 func cleanSpecLabelTransitionAllowed(policy config.ReviewerReviewEventsConfig, event ReviewEvent, outcome string) bool {
-	return strings.EqualFold(strings.TrimSpace(outcome), "clean") && policy.Clean == config.ReviewerReviewEventApprove && event == ReviewEventApprove
+	if !strings.EqualFold(strings.TrimSpace(outcome), "clean") {
+		return false
+	}
+	// Single-account installs cannot APPROVE their own PR (GitHub forbids
+	// self-approval), so the configured clean event may be COMMENT. A clean
+	// outcome expressed via the configured clean event is eligible for the
+	// spec-ready transition.
+	return event == cleanReviewEventForPolicy(policy)
 }
 
 func cleanReviewEventForPolicy(policy config.ReviewerReviewEventsConfig) ReviewEvent {

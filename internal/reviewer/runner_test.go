@@ -5540,11 +5540,11 @@ func TestProcessClaimedItemTransitionsSpecLabelsForCleanNoop(t *testing.T) {
 	if result.Status != "success" {
 		t.Fatalf("result = %#v, want success", result)
 	}
-	if len(github.removeLabelCalls) != 0 {
-		t.Fatalf("removeLabelCalls = %#v, want no spec-reviewing removal for clean COMMENT no-op", github.removeLabelCalls)
+	if len(github.removeLabelCalls) != 1 || len(github.removeLabelCalls[0].Labels) != 1 || github.removeLabelCalls[0].Labels[0] != specpr.ReviewingLabel {
+		t.Fatalf("removeLabelCalls = %#v, want spec-reviewing removed for clean COMMENT no-op", github.removeLabelCalls)
 	}
-	if len(github.addLabelCalls) != 0 {
-		t.Fatalf("addLabelCalls = %#v, want no spec-ready add for clean COMMENT no-op", github.addLabelCalls)
+	if len(github.addLabelCalls) != 1 || len(github.addLabelCalls[0].Labels) != 1 || github.addLabelCalls[0].Labels[0] != specpr.ReadyLabel {
+		t.Fatalf("addLabelCalls = %#v, want spec-ready added for clean COMMENT no-op", github.addLabelCalls)
 	}
 	if github.viewCalls < 1 {
 		t.Fatalf("viewCalls = %d, want publish detail check", github.viewCalls)
@@ -5590,7 +5590,7 @@ func TestProcessClaimedItemDoesNotTreatCleanNoopAsApprovedTransitionForApprovePo
 	}
 }
 
-func TestProcessClaimedItemDoesNotTransitionSpecLabelsForCleanNoopCommentPolicy(t *testing.T) {
+func TestProcessClaimedItemTransitionsSpecLabelsForCleanNoopCommentPolicy(t *testing.T) {
 	t.Parallel()
 	fixture := newRunnerFixture(t)
 	github := &fakeGitHubGateway{labels: []string{specpr.ReviewingLabel}, reviewRequests: []string{"octocat"}, reviewMarkerMissing: true}
@@ -5624,11 +5624,11 @@ func TestProcessClaimedItemDoesNotTransitionSpecLabelsForCleanNoopCommentPolicy(
 	if got := excludingInProgressReactions(github.addReactionCalls); len(got) != 1 || got[0].Content != "+1" {
 		t.Fatalf("addReactionCalls = %#v, want one +1 reaction", github.addReactionCalls)
 	}
-	if len(github.removeLabelCalls) != 0 {
-		t.Fatalf("removeLabelCalls = %#v, want no spec-reviewing removal for COMMENT clean policy", github.removeLabelCalls)
+	if len(github.removeLabelCalls) != 1 || len(github.removeLabelCalls[0].Labels) != 1 || github.removeLabelCalls[0].Labels[0] != specpr.ReviewingLabel {
+		t.Fatalf("removeLabelCalls = %#v, want spec-reviewing removed for COMMENT clean policy", github.removeLabelCalls)
 	}
-	if len(github.addLabelCalls) != 0 {
-		t.Fatalf("addLabelCalls = %#v, want no spec-ready add for COMMENT clean policy", github.addLabelCalls)
+	if len(github.addLabelCalls) != 1 || len(github.addLabelCalls[0].Labels) != 1 || github.addLabelCalls[0].Labels[0] != specpr.ReadyLabel {
+		t.Fatalf("addLabelCalls = %#v, want spec-ready added for COMMENT clean policy", github.addLabelCalls)
 	}
 }
 
