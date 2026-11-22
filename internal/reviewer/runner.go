@@ -6119,12 +6119,14 @@ func (r *Runner) applyCleanSpecLabelTransition(ctx context.Context, input stepIn
 }
 
 // specReady* labels: on a clean spec-ready transition, hand the linked issue
-// off for implementation by ensuring it carries dispatch/implement (so the
-// Coordinator admits a Worker) and dropping the now-obsolete plan labels.
+// off for implementation by ensuring it carries dispatch/implement (state) and
+// looper:worker-ready (the Worker's discovery trigger), and dropping the
+// now-obsolete plan labels.
 const (
-	specReadyImplementLabel   = "dispatch/implement"
-	specReadyPlanLabel        = "dispatch/plan"
-	specReadyPlanTriggerLabel = "looper:plan"
+	specReadyImplementLabel     = "dispatch/implement"
+	specReadyWorkerTriggerLabel = "looper:worker-ready"
+	specReadyPlanLabel          = "dispatch/plan"
+	specReadyPlanTriggerLabel   = "looper:plan"
 )
 
 func parseSpecLinkedIssue(defaultRepo, body, headRef string) (linkedIssueReference, bool) {
@@ -6156,9 +6158,15 @@ func (r *Runner) handoffSpecReadyForImplementation(ctx context.Context, input st
 	if freshIssue.IsPullRequest {
 		return nil
 	}
-	if !specpr.HasLabel(freshIssue.Labels, specReadyImplementLabel) {
-		if err := r.github.AddIssueLabels(ctx, githubinfra.IssueLabelsInput{Repo: issueRef.Repo, IssueNumber: issueRef.Number, Labels: []string{specReadyImplementLabel}, CWD: input.Project.RepoPath}); err != nil {
-			return &loopError{message: fmt.Sprintf("Failed to add %s to issue %s#%d for spec-ready handoff: %v", specReadyImplementLabel, issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
+	add := make([]string, 0, 2)
+	for _, label := range []string{specReadyImplementLabel, specReadyWorkerTriggerLabel} {
+		if !specpr.HasLabel(freshIssue.Labels, label) {
+			add = append(add, label)
+		}
+	}
+	if len(add) > 0 {
+		if err := r.github.AddIssueLabels(ctx, githubinfra.IssueLabelsInput{Repo: issueRef.Repo, IssueNumber: issueRef.Number, Labels: add, CWD: input.Project.RepoPath}); err != nil {
+			return &loopError{message: fmt.Sprintf("Failed to add %v to issue %s#%d for spec-ready handoff: %v", add, issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
 		}
 	}
 	remove := make([]string, 0, 2)

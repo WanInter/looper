@@ -5668,8 +5668,8 @@ func TestProcessClaimedItemHandsOffSpecToImplementationWhenAutoImplement(t *test
 	if result.Status != "success" {
 		t.Fatalf("result = %#v, want success", result)
 	}
-	if len(github.addIssueLabelCalls) != 1 || len(github.addIssueLabelCalls[0].Labels) != 1 || github.addIssueLabelCalls[0].Labels[0] != "dispatch/implement" || github.addIssueLabelCalls[0].IssueNumber != 21 {
-		t.Fatalf("addIssueLabelCalls = %#v, want dispatch/implement on #21", github.addIssueLabelCalls)
+	if len(github.addIssueLabelCalls) != 1 || len(github.addIssueLabelCalls[0].Labels) != 2 || github.addIssueLabelCalls[0].Labels[0] != "dispatch/implement" || github.addIssueLabelCalls[0].Labels[1] != "looper:worker-ready" || github.addIssueLabelCalls[0].IssueNumber != 21 {
+		t.Fatalf("addIssueLabelCalls = %#v, want dispatch/implement+looper:worker-ready on #21", github.addIssueLabelCalls)
 	}
 	if len(github.removeIssueLabelCalls) != 1 {
 		t.Fatalf("removeIssueLabelCalls = %#v, want one issue-label removal", github.removeIssueLabelCalls)
