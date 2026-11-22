@@ -49,6 +49,13 @@
 - 合并前复查 PR、关联 issue、仓库策略和人工暂停；任何未解决的评审线程（不限于 Looper）均阻止合并。新出现或编辑过的非空 `COMMENT` 评审及 PR 会话留言也会阻止复用旧证据，不猜测自由文本是否表示同意。继续使用 CI 检查和固定 HEAD 的合并调用。
 - 重新发现只安排合并检查，沿用 reviewer quiet period（设为 0 时，此路径仍等待一分钟），不挤占已入队的评审工作。回归测试 `TestSameHeadAutoMergeAfterLabelChange` 验证线程解决、留言撤除、issue hold 解除和仓库策略恢复后可重试成功，且不重跑模型、不重复发布；原有安全场景继续覆盖。
 
+## 8. fix(runtime): 有序停机后恢复中断的运行
+- 关闭接单后，Supervisor 取消 agent 和队列租约，并等待当前 daemon 拥有的进程组排空。角色的 `Wait(ctx)` 可能先因取消返回；停机另外等待执行器确认 containment 并把终态提交到 SQLite。失败或超时仍按原有的 drain failure 路径报告、保留存储，不用 PID 消失代替证据。
+- 启动仍遵循 ADR-0015 R8 / #581：没有持久终态的外部孤儿保持隔离，不接管或发送信号。正常停机的中断运行沿用原有检查点和队列恢复逻辑；已排队的中断运行再次启动不会重复重排或重置计划时间。
+- 新生成的 LaunchAgent plist 为 drain/落盘预留 `ExitTimeOut`，`bootout` 的 CLI 等待预算也相应延长。这不改变已安装 plist，不迁移旧的隔离执行记录。OpenCode v2 用 `--standalone` 启动私有服务（包括原生会话续跑和 fallback）；不支持 `--server`/`--attach`，不停止用户的共享服务。进程组不覆盖自行脱离该组的程序或外部服务。
+- Reviewer 续跑仍检查 PR HEAD 和工作树，仅清理原有保留命名空间的临时评审产物。有普通改动则保留并报告阻塞路径；已准备的同一 checkout 若新添了本地 commit，也不会为续跑而重置。
+- 验证：`TestRuntimeRestartJoinsAgentFinalizationBeforeRequeue` 用临时 SQLite 和带子进程的假 OpenCode 验证停机等待、检查点、重复恢复及单次认领；`TestStartupRecoveryExitedLeaderDoesNotConfirmDeadOrAct` 覆盖未知 containment；`TestRunPrepareWorktreeStepRealGateway*` 用本地 Git 验证临时产物和本地编辑的处理。
+
 ## 建议
 - **1（opencode `--dir`）** 与 **4（reviewer 转换）** 更像**通用缺陷**，值得提 **upstream PR** 给 `nexu-io/looper`（多账号/他人也可受益）。
 - **2、3、5** 偏单账号 / 自建工作流（5 为工作流增强），可按需 upstream 或不提。

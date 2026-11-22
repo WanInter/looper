@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -996,25 +997,23 @@ func (r *ActiveExecutionRegistry) BeginShutdown(reason string) error {
 	for _, lease := range toCancel {
 		lease.cancel(cause)
 	}
+	agentDrainFailures := r.drainShutdownAgents(entries, reason)
 	var drainErr error
-	for _, entry := range entries {
-		if err := r.killOwned(entry, reason); err != nil {
-			drainErr = errors.Join(drainErr, err)
-		}
-	}
 	budget := r.killBudget()
 	waitChans := make([]<-chan struct{}, 0, len(spawnWait)+len(rebindWait)+len(opWait)+len(nonAgentAdmitWait))
 	waitChans = append(waitChans, spawnWait...)
 	waitChans = append(waitChans, rebindWait...)
 	waitChans = append(waitChans, opWait...)
 	waitChans = append(waitChans, nonAgentAdmitWait...)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), budget)
+	defer cancelWait()
 	for _, done := range waitChans {
 		if done == nil {
 			continue
 		}
 		select {
 		case <-done:
-		case <-time.After(budget):
+		case <-waitCtx.Done():
 			drainErr = errors.Join(drainErr, errShutdownDrainTimeout)
 		}
 	}
@@ -1033,10 +1032,28 @@ func (r *ActiveExecutionRegistry) BeginShutdown(reason string) error {
 			}
 		}
 		r.mu.Unlock()
-		for _, entry := range second {
-			if err := r.killOwned(entry, reason); err != nil {
-				drainErr = errors.Join(drainErr, err)
+		agentDrainFailures = append(agentDrainFailures, r.drainShutdownAgents(second, reason)...)
+	}
+
+	// A drained process group is not yet durable recovery evidence. A role's
+	// cancellable Wait can return and release its queue lease before the agent
+	// writes its terminal observation. Join the executor itself, including
+	// Start racing with stop, before Runtime.Stop can close SQLite.
+	finalCtx, cancelFinal := context.WithTimeout(context.Background(), budget)
+	defer cancelFinal()
+	for _, lease := range toCancel {
+		if wait := lease.meta.WaitFinalized; wait != nil {
+			if err := wait(finalCtx); err != nil {
+				drainErr = errors.Join(drainErr, fmt.Errorf("agent %s shutdown finalization: %w", lease.meta.ExecutionID, err))
 			}
+		}
+	}
+	for _, failure := range agentDrainFailures {
+		// The executor drains concurrently on cancellation. A racing signal
+		// failure does not negate this same owned handle's confirmed drain.
+		drainErr = errors.Join(drainErr, failure.notifyErr)
+		if failure.killErr != nil && !failure.entry.handle.ConfirmedDead() {
+			drainErr = errors.Join(drainErr, failure.killErr)
 		}
 	}
 
@@ -1060,6 +1077,30 @@ func (r *ActiveExecutionRegistry) BeginShutdown(reason string) error {
 		return errors.Join(errShutdownDrainTimeout, drainErr)
 	}
 	return nil
+}
+
+type shutdownAgentDrainFailure struct {
+	entry     *ownedExecution
+	notifyErr error
+	killErr   error
+}
+
+// Drain concurrently so the stop grace period does not accumulate across agents.
+func (r *ActiveExecutionRegistry) drainShutdownAgents(entries []*ownedExecution, reason string) []shutdownAgentDrainFailure {
+	results := make(chan shutdownAgentDrainFailure, len(entries))
+	for _, entry := range entries {
+		go func() {
+			notifyErr, killErr := r.stopOwned(entry, reason)
+			results <- shutdownAgentDrainFailure{entry, notifyErr, killErr}
+		}()
+	}
+	var failures []shutdownAgentDrainFailure
+	for range entries {
+		if result := <-results; result.notifyErr != nil || result.killErr != nil {
+			failures = append(failures, result)
+		}
+	}
+	return failures
 }
 
 // drainNonAgentHandles waits for tracked non-agent handles to release (owner
@@ -1263,22 +1304,26 @@ func (r *ActiveExecutionRegistry) PendingCount() int {
 }
 
 func (r *ActiveExecutionRegistry) killOwned(entry *ownedExecution, reason string) error {
-	if entry == nil {
-		return nil
+	notifyErr, killErr := r.stopOwned(entry, reason)
+	if killErr == nil {
+		return notifyErr
 	}
-	var softErr error
+	return errors.Join(notifyErr, killErr)
+}
+
+func (r *ActiveExecutionRegistry) stopOwned(entry *ownedExecution, reason string) (notifyErr, killErr error) {
+	if entry == nil {
+		return nil, nil
+	}
 	if entry.softKill != nil {
-		softErr = entry.softKill(reason)
+		notifyErr = entry.softKill(reason)
 	}
 	if entry.handle != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), r.killBudget())
 		defer cancel()
-		if err := entry.handle.Kill(ctx); err != nil {
-			return errors.Join(softErr, err)
-		}
-		return softErr
+		killErr = entry.handle.Kill(ctx)
 	}
-	return softErr
+	return notifyErr, killErr
 }
 
 func (r *ActiveExecutionRegistry) killBudget() time.Duration {

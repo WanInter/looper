@@ -132,6 +132,8 @@ func TestRunPrepareWorktreeStepRealGatewayScrubsReservedReviewerScratch(t *testi
 		t.Fatalf("CreateWorktree() error = %v", err)
 	}
 	wtPath := created.WorktreePath
+	// Simulate a checkout already prepared by the first run before interruption.
+	mustRunGit(t, wtPath, "checkout", "--detach", headSHA)
 
 	scratch := filepath.Join(wtPath, ".looper-review-3503.json")
 	if err := os.WriteFile(scratch, []byte(`{"leftover":true}`+"\n"), 0o644); err != nil {
@@ -148,7 +150,7 @@ func TestRunPrepareWorktreeStepRealGatewayScrubsReservedReviewerScratch(t *testi
 		Checkpoint: reviewerCheckpoint{
 			Detail:   &checkpointDetail{HeadSHA: headSHA, BaseRefName: "main"},
 			Snapshot: &checkpointSnapshot{HeadSHA: headSHA},
-			Worktree: &checkpointWorktree{Path: wtPath, Branch: "pr-77-head", BaseBranch: "main"},
+			Worktree: &checkpointWorktree{Path: wtPath, Branch: "pr-77-head", BaseBranch: "main", HeadSHA: headSHA},
 		},
 	})
 	if prepErr != nil {
@@ -159,6 +161,25 @@ func TestRunPrepareWorktreeStepRealGatewayScrubsReservedReviewerScratch(t *testi
 	}
 	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
 		t.Fatalf("reserved scratch still present after prepare: err=%v", err)
+	}
+
+	// A clean index doesn't mean the checkout has no edits worth preserving.
+	mustRunGit(t, wtPath, "commit", "--allow-empty", "-m", "local commit to preserve")
+	localHead := mustRunGit(t, wtPath, "rev-parse", "HEAD")
+	checkpoint.Worktree.PreparedAt = ""
+	input := stepInput{
+		Project: storage.ProjectRecord{ID: projectID, RepoPath: repoPath, BaseBranch: stringPtr("main"), MetadataJSON: &metadata},
+		Repo:    "acme/looper", PRNumber: prNumber, Checkpoint: checkpoint,
+	}
+	for i := 0; i < 2; i++ {
+		next, err := runner.runPrepareWorktreeStep(context.Background(), input)
+		if err == nil || !contains(err.Error(), "local commits were preserved") || !contains(err.Error(), "manual intervention") {
+			t.Fatalf("attempt %d: expected local HEAD blocker, got %v", i, err)
+		}
+		if got := mustRunGit(t, wtPath, "rev-parse", "HEAD"); got != localHead {
+			t.Fatalf("attempt %d: local HEAD moved from %q to %q", i, localHead, got)
+		}
+		input.Checkpoint = next
 	}
 }
 

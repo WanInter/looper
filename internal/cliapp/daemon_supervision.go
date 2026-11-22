@@ -81,8 +81,20 @@ type launchdPlistConfig struct {
 	RunAtLoad              bool
 	RestartPolicy          config.DaemonRestartPolicy
 	RestartThrottleSeconds int
+	ShutdownTimeoutMS      int
 	StandardOutPath        string
 	StandardErrorPath      string
+}
+
+// Allow the Supervisor's bounded drain/finalization phases to complete before
+// launchd escalates to SIGKILL. HTTP and producer joins also use the configured
+// daemon timeout. launchctl bootout itself must get at least the same budget.
+func launchdExitTimeout(shutdownTimeoutMS int) time.Duration {
+	return 150*time.Second + 8*time.Duration(max(1000, shutdownTimeoutMS))*time.Millisecond
+}
+
+func launchdBootoutTimeout(shutdownTimeoutMS int) time.Duration {
+	return launchdExitTimeout(shutdownTimeoutMS) + 10*time.Second
 }
 
 func (r *commandRuntime) resolveDaemonStatePath() (string, error) {
@@ -335,7 +347,8 @@ func (r *commandRuntime) startLaunchdDaemon(ctx context.Context, out io.Writer, 
 	for key, value := range loaded.Config.Daemon.Environment {
 		launchEnv[key] = value
 	}
-	plist, err := generateLaunchdPlist(launchdPlistConfig{Label: launchdLooperdLabel, ProgramArguments: programArgs, WorkingDirectory: cwd, Environment: launchEnv, RunAtLoad: true, RestartPolicy: loaded.Config.Daemon.RestartPolicy, RestartThrottleSeconds: loaded.Config.Daemon.RestartThrottleSeconds, StandardOutPath: logs.Stdout, StandardErrorPath: logs.Stderr})
+	shutdownTimeoutMS := loaded.Config.Daemon.ShutdownTimeoutMS
+	plist, err := generateLaunchdPlist(launchdPlistConfig{Label: launchdLooperdLabel, ProgramArguments: programArgs, WorkingDirectory: cwd, Environment: launchEnv, RunAtLoad: true, RestartPolicy: loaded.Config.Daemon.RestartPolicy, RestartThrottleSeconds: loaded.Config.Daemon.RestartThrottleSeconds, ShutdownTimeoutMS: shutdownTimeoutMS, StandardOutPath: logs.Stdout, StandardErrorPath: logs.Stderr})
 	if err != nil {
 		return err
 	}
@@ -344,7 +357,7 @@ func (r *commandRuntime) startLaunchdDaemon(ctx context.Context, out io.Writer, 
 	}
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	r.migrateLegacyLaunchdPlist(ctx, launchctlPath, domain)
-	_, _ = r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, daemonCommandTimeout)
+	_, _ = r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, launchdBootoutTimeout(shutdownTimeoutMS))
 	result, err := r.runCommand(ctx, launchctlPath, []string{"bootstrap", domain, plistPath}, daemonCommandTimeout)
 	if err != nil {
 		return fmt.Errorf("launchctl bootstrap failed: %w", err)
@@ -353,7 +366,7 @@ func (r *commandRuntime) startLaunchdDaemon(ctx context.Context, out io.Writer, 
 		return fmt.Errorf("launchctl bootstrap failed: %s", strings.TrimSpace(result.Stderr))
 	}
 	if err := r.waitForDaemonReadyByAPI(ctx, client, apiURL, r.daemonStartReadyTimeout(), daemonStartReadyPollPeriod); err != nil {
-		_, _ = r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, daemonCommandTimeout)
+		_, _ = r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, launchdBootoutTimeout(shutdownTimeoutMS))
 		_ = r.removeFile(plistPath)
 		statePath, stateErr := r.resolveDaemonStatePath()
 		if stateErr == nil {
@@ -395,7 +408,7 @@ func (r *commandRuntime) stopLaunchdDaemon(ctx context.Context, out io.Writer, l
 		return false, err
 	}
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	result, err := r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, daemonCommandTimeout)
+	result, err := r.runCommand(ctx, launchctlPath, []string{"bootout", domain, plistPath}, launchdBootoutTimeout(loaded.Config.Daemon.ShutdownTimeoutMS))
 	if err != nil {
 		return false, err
 	}
@@ -508,6 +521,7 @@ func generateLaunchdPlist(cfg launchdPlistConfig) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported restart policy %q", cfg.RestartPolicy)
 	}
 	b.WriteString(fmt.Sprintf("\t<key>ThrottleInterval</key>\n\t<integer>%d</integer>\n", cfg.RestartThrottleSeconds))
+	b.WriteString(fmt.Sprintf("\t<key>ExitTimeOut</key>\n\t<integer>%d</integer>\n", (launchdExitTimeout(cfg.ShutdownTimeoutMS)+time.Second-1)/time.Second))
 	writePlistString(&b, "StandardOutPath", cfg.StandardOutPath)
 	writePlistString(&b, "StandardErrorPath", cfg.StandardErrorPath)
 	b.WriteString("</dict>\n</plist>\n")

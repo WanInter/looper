@@ -19,3 +19,4 @@ deploy/**/*.env
 # Built onboarding bundles may contain the shared secrets — never commit.
 looper-hitl-onboarding*.zip
 .slim/deepwork/
+.worktrees
