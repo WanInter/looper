@@ -2095,9 +2095,9 @@ func resolveOpenCodeArgs(cfg ExecutorConfig, args []string, workingDirectory str
 	if !containsArg(resolved, "run") {
 		resolved = append([]string{"run"}, resolved...)
 	}
-	if strings.TrimSpace(workingDirectory) != "" && !hasAnyFlag(resolved, []string{"--dir"}) {
-		resolved = appendDirFlag(resolved, workingDirectory)
-	}
+	// opencode v2+ has no --dir flag (it uses the process cwd, which looper
+	// already sets to the worktree). Passing --dir fails every run.
+	_ = workingDirectory
 	withModel := prependModelFlag(resolved, cfg.Model, "--model", []string{"--model", "-m"})
 	if hasAnyFlag(withModel, []string{"-p", "--prompt", "-f", "--file"}) {
 		return withModel
@@ -2211,9 +2211,8 @@ func resolveNativeResumeArgs(cfg ExecutorConfig, workingDirectory string, args [
 		if !containsArg(resolved, "run") {
 			resolved = append([]string{"run"}, resolved...)
 		}
-		if strings.TrimSpace(workingDirectory) != "" && !hasAnyFlag(resolved, []string{"--dir"}) {
-			resolved = appendDirFlag(resolved, workingDirectory)
-		}
+		// opencode v2+ has no --dir flag (uses the process cwd; looper sets cmd.Dir to the worktree).
+		_ = workingDirectory
 		if !hasAnyFlag(resolved, []string{"--session", "--continue"}) {
 			resolved = append(resolved, "--session", sessionID)
 		}
