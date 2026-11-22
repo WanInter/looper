@@ -50,7 +50,7 @@ func Decide(pr PRSnapshot, autoMergeConfig config.ReviewerAutoMergeConfig, prote
 	if !autoMergeConfig.Enabled {
 		return RefuseWithReason(RefusalReasonDisabled)
 	}
-	if !hasLooperLabel(pr.Labels) || !pr.HasTrackedIssueLink {
+	if !HasLooperLabel(pr.Labels) || !pr.HasTrackedIssueLink {
 		return RefuseWithReason(RefusalReasonScope)
 	}
 	if autoMergeConfig.RequireBranchProtection && (!protection.Exists || !protection.HasRequiredChecks) {
@@ -65,7 +65,8 @@ func Decide(pr PRSnapshot, autoMergeConfig config.ReviewerAutoMergeConfig, prote
 	return OptInWithStrategy(autoMergeConfig.Strategy)
 }
 
-func hasLooperLabel(labels []string) bool {
+// HasLooperLabel reports whether the PR carries an auto-merge scope label.
+func HasLooperLabel(labels []string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(label)), "looper:") {
 			return true

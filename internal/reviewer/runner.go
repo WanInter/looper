@@ -319,8 +319,10 @@ type IssueCommentResult struct {
 }
 
 type IssueComment struct {
-	ID   int64
-	Body string
+	ID        int64
+	Body      string
+	Author    string
+	UpdatedAt string
 }
 
 type UpdateIssueCommentInput struct {
@@ -638,6 +640,7 @@ type reviewerCheckpoint struct {
 	// disposition cleared Looper blockers. It must not reuse head-only
 	// publication identity or the lastPublishedHeadSha already-published skip.
 	ConvergencePass         bool                     `json:"convergencePass,omitempty"`
+	ReconcileAutoMergeHead  string                   `json:"reconcileAutoMergeHead,omitempty"`
 	ReviewSignalFingerprint string                   `json:"reviewSignalFingerprint,omitempty"`
 	PendingReview           *pendingReviewCheckpoint `json:"pendingReview,omitempty"`
 	SkipReason              string                   `json:"skipReason,omitempty"`
@@ -1223,6 +1226,7 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 		samePublishedHead = true
 	}
 	dispositionOnly := false
+	reconcileAutoMerge := false
 	reviewSignal := ""
 	// For continuous native-thread loops, evaluate same-head signal before
 	// head-based lastFilterSkip suppression so a changed disposition is not
@@ -1235,12 +1239,15 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 			return err
 		}
 		switch decision.action {
-		case sameHeadDiscoverySkip:
-			result.Skipped++
-			return nil
-		case sameHeadDiscoveryBaselineOnly:
-			result.Skipped++
-			return nil
+		case sameHeadDiscoverySkip, sameHeadDiscoveryBaselineOnly:
+			reconcileAutoMerge, err = r.discoverSameHeadAutoMerge(ctx, project.ID, loopResult.record, pr)
+			if err != nil {
+				return err
+			}
+			if !reconcileAutoMerge {
+				result.Skipped++
+				return nil
+			}
 		case sameHeadDiscoveryEnqueueDisposition:
 			dispositionOnly = true
 			reviewSignal = decision.signal
@@ -1248,7 +1255,7 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 			reviewSignal = decision.signal
 		}
 	}
-	if !dispositionOnly && reviewerDiscoverySuppressedByLastSkip(loopResult.record, pr, *currentLogin, policy) && !allowThreadResolutionFollowUp {
+	if !dispositionOnly && !reconcileAutoMerge && reviewerDiscoverySuppressedByLastSkip(loopResult.record, pr, *currentLogin, policy) && !allowThreadResolutionFollowUp {
 		allowFollowUp, followErr := r.allowThreadResolutionFollowUpAfterNotRequestedSkip(ctx, project.RepoPath, repo, pr, *currentLogin, meta, policy)
 		if followErr != nil {
 			return followErr
@@ -1331,7 +1338,11 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 		result.Skipped++
 		return nil
 	}
-	availableAt := r.nextReviewAvailableAt(meta, dispositionOnly)
+	availableAt := r.nextReviewAvailableAt(meta, dispositionOnly || reconcileAutoMerge)
+	if reconcileAutoMerge && r.loopConfig.QuietPeriodSeconds == 0 {
+		// Keep reconciliation paced even when review debounce is disabled.
+		availableAt = availableAt.Add(time.Minute)
+	}
 	queueItem, queueErr := r.enqueue(ctx, enqueueInput{
 		ProjectID:               project.ID,
 		LoopID:                  loopResult.record.ID,
@@ -1340,6 +1351,7 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 		HeadSHA:                 pr.HeadSHA,
 		ReviewSignalFingerprint: reviewSignal,
 		DispositionOnly:         dispositionOnly,
+		ReconcileAutoMerge:      reconcileAutoMerge,
 		AvailableAt:             availableAt,
 	})
 	if queueErr != nil {
@@ -1594,9 +1606,20 @@ func (r *Runner) discoverExistingReviewerLoop(ctx context.Context, project stora
 	if err != nil {
 		return err
 	}
+	if !isManualReviewerLoop(loop) && !policy.MatchAnyTrigger && !labelsMatch(detail.Labels, policy.Labels, policy.LabelMode) {
+		result.Skipped++
+		return nil
+	}
 	requireReviewRequest := requireReviewRequestForLoop(loop, reviewRequestRequiredForCandidate(policy, detail.Labels), detail.HeadSHA)
 	allowThreadResolutionFollowUp := false
 	if !networkpolicy.IsRouted(policy.RoutedClaimPolicy) && requireReviewRequest && reviewRequestsKnownAbsent(detail.ReviewRequests, *currentLogin) {
+		reconcile, err := r.discoverSameHeadAutoMerge(ctx, project.ID, loop, summaryFromDetail(detail))
+		if err != nil {
+			return err
+		}
+		if reconcile {
+			return r.enqueueReviewerDiscoveryCandidate(ctx, project, repo, policy, currentLogin, summaryFromDetail(detail), &loop, false, result)
+		}
 		allowThreadResolutionFollowUp = r.hasThreadResolutionFollowUpCandidate(ctx, project.RepoPath, repo, detail.Number, detail.HeadSHA, *currentLogin)
 		if !allowThreadResolutionFollowUp {
 			// Narrow disposition candidate still allows discovery when Enabled=false.
@@ -1610,10 +1633,6 @@ func (r *Runner) discoverExistingReviewerLoop(ctx context.Context, project stora
 			result.Skipped++
 			return nil
 		}
-	}
-	if !isManualReviewerLoop(loop) && !policy.MatchAnyTrigger && !labelsMatch(detail.Labels, policy.Labels, policy.LabelMode) {
-		result.Skipped++
-		return nil
 	}
 	return r.enqueueReviewerDiscoveryCandidate(ctx, project, repo, policy, currentLogin, summaryFromDetail(detail), &loop, allowThreadResolutionFollowUp, result)
 }
@@ -2860,6 +2879,10 @@ func (r *Runner) runFilterStep(ctx context.Context, input stepInput) (reviewerCh
 		}
 		return checkpoint, nil
 	}
+	mergeOnly, _ := parseJSONObject(input.QueueItem.PayloadJSON)["reconcileAutoMerge"].(bool)
+	if mergeOnly && headSHAFromQueuePayload(input.QueueItem.PayloadJSON) != checkpoint.Detail.HeadSHA {
+		return markReviewerRunStale(checkpoint, "PR head changed before auto-merge reconciliation"), nil
+	}
 	if !isManualReviewerLoop(input.Loop) && domain.IsAutoLaneHeld(domain.LoopTypeReviewer, checkpoint.Detail.Labels) {
 		return checkpoint, &holdSkipError{summary: fmt.Sprintf("Reviewer stopped because %s#%d is currently held", input.Repo, input.PRNumber)}
 	}
@@ -2903,23 +2926,36 @@ func (r *Runner) runFilterStep(ctx context.Context, input stepInput) (reviewerCh
 			return checkpoint, nil
 		}
 	}
+	stopOnApproved := false
 	if !isManualReviewerLoop(input.Loop) && len(checkpoint.Detail.Reviews) > 0 && r.loopConfig.StopOnApproved {
 		if err := ensureCurrentLogin(); err != nil {
 			return checkpoint, &loopError{message: err.Error(), kind: FailureRetryableTransient}
 		}
-		if r.loopConfig.StopOnApproved && hasApprovedReviewByAuthorForHead(checkpoint.Detail.Reviews, currentLogin, checkpoint.Detail.HeadSHA) {
-			checkpoint.SkipReason = fmt.Sprintf("Terminated reviewer loop for approved pull request %s#%d", input.Repo, input.PRNumber)
-			checkpoint.SkipKind = "approved"
-			if err := r.terminateLoop(ctx, input.Loop, "approved"); err != nil {
-				return checkpoint, err
-			}
+		stopOnApproved = hasApprovedReviewByAuthorForHead(checkpoint.Detail.Reviews, currentLogin, checkpoint.Detail.HeadSHA)
+	}
+	meta := parseJSONObject(input.Loop.MetadataJSON)
+	samePublishedHead := reviewengagement.PublishedHead(input.Loop.MetadataJSON) == checkpoint.Detail.HeadSHA && checkpoint.Detail.HeadSHA != ""
+	reconcileMerge := false
+	if samePublishedHead && !queuedSameHeadConvergencePass(input.QueueItem.PayloadJSON) && !payloadDispositionOnly(input.QueueItem.PayloadJSON) {
+		detail := checkpoint.Detail
+		reconcileMerge = r.reviewerAutoMergeConfigForProject(input.Project.ID).Enabled && autoMergePRCandidate(detail.HeadSHA, detail.State, detail.IsDraft, detail.HasConflicts, detail.Labels) &&
+			mergePublicationID(input.Loop, detail.HeadSHA) != ""
+		if reconcileMerge && (mergeOnly || stopOnApproved) {
+			checkpoint.ReconcileAutoMergeHead = detail.HeadSHA
 			return checkpoint, nil
 		}
 	}
-	meta := parseJSONObject(input.Loop.MetadataJSON)
-	samePublishedHead := false
-	if last, ok := stringFromAny(meta["lastPublishedHeadSha"]); ok && checkpoint.Detail.HeadSHA != "" && last == checkpoint.Detail.HeadSHA {
-		samePublishedHead = true
+	if mergeOnly {
+		checkpoint.SkipReason = "Skipped ineligible same-head auto-merge reconciliation"
+		return checkpoint, nil
+	}
+	if stopOnApproved {
+		checkpoint.SkipReason = fmt.Sprintf("Terminated reviewer loop for approved pull request %s#%d", input.Repo, input.PRNumber)
+		checkpoint.SkipKind = "approved"
+		if err := r.terminateLoop(ctx, input.Loop, "approved"); err != nil {
+			return checkpoint, err
+		}
+		return checkpoint, nil
 	}
 	alreadyReviewedHead := false
 	if !isManualReviewerLoop(input.Loop) && len(checkpoint.Detail.Reviews) > 0 {
@@ -2953,6 +2989,10 @@ func (r *Runner) runFilterStep(ctx context.Context, input stepInput) (reviewerCh
 			checkpoint.SkipReviewerLogin = currentLogin
 			return checkpoint, nil
 		} else if samePublishedHead {
+			if reconcileMerge {
+				checkpoint.ReconcileAutoMergeHead = checkpoint.Detail.HeadSHA
+				return checkpoint, nil
+			}
 			checkpoint.SkipReason = fmt.Sprintf("Skipped already-reviewed head %s for %s#%d", checkpoint.Detail.HeadSHA, input.Repo, input.PRNumber)
 			checkpoint.SkipKind = "already_published_head"
 			return checkpoint, nil
@@ -3403,6 +3443,12 @@ func (r *Runner) runClaimStep(ctx context.Context, input stepInput) (reviewerChe
 	}
 	checkpoint := input.Checkpoint
 	checkpoint.ClaimedLockKey = lockKey
+	if checkpoint.ReconcileAutoMergeHead != "" {
+		if err := r.reconcileSameHeadAutoMerge(ctx, input, checkpoint.ReconcileAutoMergeHead); err != nil {
+			return checkpoint, errors.Join(err, r.repos.Locks.Release(context.WithoutCancel(ctx), lockKey))
+		}
+		checkpoint.SkipReason = fmt.Sprintf("Reconciled auto-merge eligibility for already-reviewed head %s", checkpoint.ReconcileAutoMergeHead)
+	}
 	return checkpoint, nil
 }
 
@@ -5267,7 +5313,7 @@ func (r *Runner) runReviewStep(ctx context.Context, input stepInput) (reviewerCh
 		return r.finishNativeNeedsHumanCompletion(ctx, input, checkpoint, result, nativeCompletion, idempotencyKey)
 	}
 	nativeFindingsJSON := ""
-	if len(nativeCompletion.Findings) > 0 || nativeCompletion.Coverage != nil {
+	if len(nativeCompletion.Findings) > 0 || nativeCompletion.Coverage != nil || nativeCompletion.Outcome != "" {
 		payload, marshalErr := json.Marshal(nativeCompletion)
 		if marshalErr != nil {
 			return checkpoint, &loopError{message: fmt.Sprintf("marshal reviewer native completion: %v", marshalErr), kind: FailureRetryableAfterResume}
@@ -5407,7 +5453,15 @@ func (r *Runner) runPublishStep(ctx context.Context, input stepInput) (reviewerC
 		if criteriaResult, err := r.maybePublishCriteriaAnchoredCleanReview(ctx, input, checkpoint, pending, detail); err != nil {
 			return checkpoint, err
 		} else if criteriaResult != nil {
-			if err := r.recordPublishedReviewProgress(ctx, input, pending, criteriaResult.reviewEvent); err != nil {
+			proof := mergeProofRejected
+			if mergeCleanCompletion(pending) && resolvePullRequestPhase(detail.Labels) != "spec" && resolvePullRequestPhase(detailLabels(checkpoint.Detail)) != "spec" {
+				if criteriaResult.recordOnly {
+					proof = mergeProofNoop
+				} else if mergeCleanMarker(criteriaResult.marker) {
+					proof = mergeProofNative
+				}
+			}
+			if err := r.recordPublishedReviewProgressWithProof(ctx, input, pending, criteriaResult.reviewEvent, proof); err != nil {
 				return checkpoint, err
 			}
 			return checkpoint, nil
@@ -5442,7 +5496,11 @@ func (r *Runner) runPublishStep(ctx context.Context, input stepInput) (reviewerC
 			if err := r.applyVerifiedReviewSideEffects(ctx, input, checkpoint, detail, found); err != nil {
 				return checkpoint, err
 			}
-			if err := r.recordPublishedReviewProgress(ctx, input, pending, pendingReviewEvent(pending)); err != nil {
+			proof := mergeProofRejected
+			if mergeCleanCompletion(pending) && mergeCleanMarker(found) && resolvePullRequestPhase(detail.Labels) != "spec" && resolvePullRequestPhase(detailLabels(checkpoint.Detail)) != "spec" {
+				proof = mergeProofNative
+			}
+			if err := r.recordPublishedReviewProgressWithProof(ctx, input, pending, pendingReviewEvent(pending), proof); err != nil {
 				return checkpoint, err
 			}
 			return checkpoint, nil
@@ -5450,7 +5508,11 @@ func (r *Runner) runPublishStep(ctx context.Context, input stepInput) (reviewerC
 		if err := r.applyCleanNoopReviewSideEffects(ctx, input, checkpoint, detail); err != nil {
 			return checkpoint, err
 		}
-		if err := r.recordPublishedReviewProgress(ctx, input, pending, ReviewEventComment); err != nil {
+		proof := mergeProofRejected
+		if mergeCleanCompletion(pending) && resolvePullRequestPhase(detail.Labels) != "spec" && resolvePullRequestPhase(detailLabels(checkpoint.Detail)) != "spec" {
+			proof = mergeProofNoop
+		}
+		if err := r.recordPublishedReviewProgressWithProof(ctx, input, pending, ReviewEventComment, proof); err != nil {
 			return checkpoint, err
 		}
 		return checkpoint, nil
@@ -5595,7 +5657,11 @@ func (r *Runner) runPublishStep(ctx context.Context, input stepInput) (reviewerC
 	if err := r.applyVerifiedReviewSideEffects(ctx, input, checkpoint, detail, markerResult); err != nil {
 		return checkpoint, err
 	}
-	if err := r.recordPublishedReviewProgress(ctx, input, pending, pendingReviewEvent(pending)); err != nil {
+	proof := mergeProofRejected
+	if mergeCleanCompletion(pending) && mergeCleanMarker(markerResult) && resolvePullRequestPhase(detail.Labels) != "spec" && resolvePullRequestPhase(detailLabels(input.Checkpoint.Detail)) != "spec" {
+		proof = mergeProofNative
+	}
+	if err := r.recordPublishedReviewProgressWithProof(ctx, input, pending, pendingReviewEvent(pending), proof); err != nil {
 		return checkpoint, err
 	}
 	return checkpoint, nil
@@ -7472,13 +7538,21 @@ func isValidBlockingReviewEvent(value string) bool {
 }
 
 func (r *Runner) recordPublishedReviewProgress(ctx context.Context, input stepInput, pending pendingReviewCheckpoint, reviewEvent ReviewEvent) error {
+	return r.recordPublishedReviewProgressWithProof(ctx, input, pending, reviewEvent, mergeProofRejected)
+}
+
+func (r *Runner) recordPublishedReviewProgressWithProof(ctx context.Context, input stepInput, pending pendingReviewCheckpoint, reviewEvent ReviewEvent, proof string) error {
 	updated, err := r.updateLoop(ctx, input.Loop, func(updated *storage.LoopRecord) {
 		meta := parseJSONObject(updated.MetadataJSON)
 		previous, _ := stringFromAny(meta["lastPublishedHeadSha"])
 		previousReviewID, _ := stringFromAny(meta[metadataLastPublishedReviewIDKey])
 		merge := map[string]any{"lastPublishedHeadSha": pending.HeadSHA, "lastReviewEvent": string(reviewEvent), "lastReviewSummary": pending.Summary, "lastPublishedAt": r.nowISO()}
+		merge[metadataMergeProof] = proof
+		merge[metadataMergeReconciled] = ""
 		if reviewID := strings.TrimSpace(pending.IdempotencyKey); reviewID != "" {
 			merge[metadataLastPublishedReviewIDKey] = reviewID
+		} else {
+			merge[metadataMergeProof] = mergeProofRejected
 		}
 		metadataJSON, err := mergeLoopMetadataJSON(updated.MetadataJSON, merge)
 		if err != nil {
@@ -8117,6 +8191,7 @@ type enqueueInput struct {
 	ReviewSignalFingerprint string
 	DispositionOnly         bool
 	ConvergencePass         bool
+	ReconcileAutoMerge      bool
 	AvailableAt             time.Time
 }
 
@@ -8131,14 +8206,23 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 		availableAt = eventlog.FormatJavaScriptISOString(input.AvailableAt.UTC())
 	}
 	payloadJSON := reviewerQueuePayloadJSON(input.HeadSHA, input.ReviewSignalFingerprint, input.DispositionOnly)
-	if input.ConvergencePass {
+	if input.ConvergencePass || input.ReconcileAutoMerge {
 		merged := parseJSONObject(&payloadJSON)
-		merged["convergencePass"] = true
+		if input.ConvergencePass {
+			merged["convergencePass"] = true
+		}
+		if input.ReconcileAutoMerge {
+			merged["reconcileAutoMerge"] = true
+		}
 		if encoded, err := json.Marshal(merged); err == nil {
 			payloadJSON = string(encoded)
 		}
 	}
 	if existing != nil {
+		// Merge-only discovery must not replace or postpone active review work.
+		if input.ReconcileAutoMerge {
+			return *existing, nil
+		}
 		// Coalesce queued/retry-wait items in place to the latest head+signal.
 		// Retry-wait items remain status "queued" with a future AvailableAt.
 		if existing.Status == "queued" && (strings.TrimSpace(input.HeadSHA) != "" || strings.TrimSpace(input.ReviewSignalFingerprint) != "") {

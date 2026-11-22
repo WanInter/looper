@@ -24,6 +24,17 @@ import (
 	"github.com/nexu-io/looper/internal/worker"
 )
 
+func TestSummarizeCheckStatesIncludesInProgressCheckRuns(t *testing.T) {
+	checks := []map[string]any{
+		{"status": "COMPLETED", "conclusion": "SUCCESS"},
+		{"status": "IN_PROGRESS", "conclusion": ""},
+		{"state": "PENDING"},
+	}
+	if got := summarizeCheckStates(checks); got != "SUCCESS, IN_PROGRESS, PENDING" {
+		t.Fatalf("summarizeCheckStates = %q", got)
+	}
+}
+
 func TestWorkerAgentExecutionAdapterPropagatesParseStatus(t *testing.T) {
 	t.Parallel()
 

@@ -1748,7 +1748,7 @@ func (a reviewerGitHubAdapter) ListIssueComments(ctx context.Context, input revi
 		}
 		out := make([]reviewer.IssueComment, 0, len(comments))
 		for _, comment := range comments {
-			out = append(out, reviewer.IssueComment{ID: comment.ID, Body: comment.Body})
+			out = append(out, reviewer.IssueComment{ID: comment.ID, Body: comment.Body, Author: comment.User.Login, UpdatedAt: comment.UpdatedAt})
 		}
 		return out, nil
 	}
@@ -1761,7 +1761,7 @@ func (a reviewerGitHubAdapter) ListIssueComments(ctx context.Context, input revi
 	}
 	out := make([]reviewer.IssueComment, 0, len(comments))
 	for _, comment := range comments {
-		out = append(out, reviewer.IssueComment{ID: comment.ID, Body: comment.Body})
+		out = append(out, reviewer.IssueComment{ID: comment.ID, Body: comment.Body, Author: comment.Author, UpdatedAt: firstNonEmpty(comment.UpdatedAt, comment.CreatedAt)})
 	}
 	return out, nil
 }
@@ -5370,6 +5370,9 @@ func summarizeCheckStates(checks []map[string]any) string {
 		state, _ := check["conclusion"].(string)
 		if strings.TrimSpace(state) == "" {
 			state, _ = check["state"].(string)
+		}
+		if strings.TrimSpace(state) == "" {
+			state, _ = check["status"].(string)
 		}
 		state = strings.TrimSpace(state)
 		if state == "" {

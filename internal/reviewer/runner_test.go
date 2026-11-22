@@ -14028,6 +14028,7 @@ type fakeGitHubGateway struct {
 	viewBody                        string
 	viewState                       string
 	viewStateAfterFirstView         string
+	viewChecksSummary               string
 	closeAfterReviewMarker          bool
 	closeOnNextView                 bool
 	viewErrs                        []error
@@ -14180,7 +14181,7 @@ func (g *fakeGitHubGateway) ViewPullRequest(context.Context, ViewPullRequestInpu
 	if g.omitReviewsOnView {
 		reviews = nil
 	}
-	return PullRequestDetail{Number: 42, Title: "Review me", Body: body, State: state, IsDraft: g.viewDraft, ReviewDecision: reviewDecision, Labels: append([]string(nil), g.labels...), HeadSHA: headSHA, BaseSHA: firstNonEmpty(g.viewBaseSHA, "base123"), HeadRefName: "feature/review-me", BaseRefName: firstNonEmpty(g.viewBaseRef, "main"), Author: g.effectiveAuthor(), ReviewRequests: reviewRequests, ReviewRequestUsers: users, HasConflicts: g.hasConflicts, ChecksSummary: "SUCCESS", Comments: cloneCommentMaps(comments), IssueComments: cloneCommentMaps(g.issueComments), Reviews: reviews}, nil
+	return PullRequestDetail{Number: 42, Title: "Review me", Body: body, State: state, IsDraft: g.viewDraft, ReviewDecision: reviewDecision, Labels: append([]string(nil), g.labels...), HeadSHA: headSHA, BaseSHA: firstNonEmpty(g.viewBaseSHA, "base123"), HeadRefName: "feature/review-me", BaseRefName: firstNonEmpty(g.viewBaseRef, "main"), Author: g.effectiveAuthor(), ReviewRequests: reviewRequests, ReviewRequestUsers: users, HasConflicts: g.hasConflicts, ChecksSummary: firstNonEmpty(g.viewChecksSummary, "SUCCESS"), Comments: cloneCommentMaps(comments), IssueComments: cloneCommentMaps(g.issueComments), Reviews: reviews}, nil
 }
 
 func (g *fakeGitHubGateway) LoadPullRequestReviews(context.Context, ViewPullRequestInput) ([]map[string]any, error) {
@@ -14276,7 +14277,7 @@ func (g *fakeGitHubGateway) CapturePullRequestSnapshot(_ context.Context, input 
 	if g.changeHeadOnSecondView && g.viewCalls >= 2 {
 		headSHA = "new-head"
 	}
-	return storage.PullRequestSnapshotRecord{ID: fmt.Sprintf("snapshot:%d:%s", input.PRNumber, input.CapturedAt), ProjectID: input.ProjectID, Repo: input.Repo, PRNumber: input.PRNumber, HeadSHA: headSHA, BaseSHA: stringPtr("base123"), Title: stringPtr("Review me"), Body: stringPtr("PR body"), Author: stringPtr(g.effectiveAuthor()), ChecksSummary: stringPtr("SUCCESS"), CapturedAt: input.CapturedAt, CreatedAt: input.CapturedAt}, nil
+	return storage.PullRequestSnapshotRecord{ID: fmt.Sprintf("snapshot:%d:%s", input.PRNumber, input.CapturedAt), ProjectID: input.ProjectID, Repo: input.Repo, PRNumber: input.PRNumber, HeadSHA: headSHA, BaseSHA: stringPtr("base123"), Title: stringPtr("Review me"), Body: stringPtr(firstNonEmpty(g.viewBody, "PR body")), Author: stringPtr(g.effectiveAuthor()), ChecksSummary: stringPtr("SUCCESS"), CapturedAt: input.CapturedAt, CreatedAt: input.CapturedAt}, nil
 }
 
 func (g *fakeGitHubGateway) FindReviewMarker(_ context.Context, input VerifyReviewMarkerInput) (ReviewMarkerResult, error) {
@@ -14361,7 +14362,9 @@ func (g *fakeGitHubGateway) ListIssueComments(_ context.Context, input ViewPullR
 		if id == 0 {
 			id = int64(i + 1)
 		}
-		out = append(out, IssueComment{ID: id, Body: body})
+		updatedAt, _ := comment["updatedAt"].(string)
+		author, _ := comment["author"].(string)
+		out = append(out, IssueComment{ID: id, Body: body, Author: author, UpdatedAt: updatedAt})
 	}
 	_ = input
 	return out, nil
@@ -14398,7 +14401,7 @@ func (g *fakeGitHubGateway) SubmitReview(_ context.Context, input githubinfra.Su
 	}
 	body := input.Body
 	g.reviews = append(g.reviews, map[string]any{"body": body, "state": state, "user": map[string]any{"login": firstNonEmpty(strings.TrimSpace(g.currentLogin), "octocat")}})
-	g.issueComments = append(g.issueComments, map[string]any{"body": body})
+	g.issueComments = append(g.issueComments, map[string]any{"body": body, "author": firstNonEmpty(strings.TrimSpace(g.currentLogin), "octocat")})
 	return nil
 }
 
