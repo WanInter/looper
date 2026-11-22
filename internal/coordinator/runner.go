@@ -1381,7 +1381,11 @@ func reviewAssignmentEligible(detail githubinfra.PullRequestDetail, trigger conf
 	if !reviewAssignmentMatchesTrigger(detail, trigger) {
 		return false
 	}
-	if !trigger.EnableSelfReview && normalizeLogin(detail.Author) == candidate.Login {
+	// GitHub forbids requesting a review from the PR author (HTTP 422), so a
+	// self-authored PR can never be reviewer-request-assigned; self-review is
+	// instead picked up by the reviewer's own label-based discovery
+	// (EnableSelfReview). Requesting it here would fail the whole discovery tick.
+	if normalizeLogin(detail.Author) == candidate.Login {
 		return false
 	}
 	labels := append([]string(nil), detail.Labels...)
