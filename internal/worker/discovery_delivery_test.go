@@ -16,6 +16,41 @@ import (
 
 const discoveryTestRepo = "acme/looper"
 
+// discoveryRecordingLogger captures the diagnostics discovery emits for issues
+// it refuses to act on, so tests can assert the operator-visible reason.
+type discoveryRecordingLogger struct {
+	entries []discoveryLogEntry
+}
+
+type discoveryLogEntry struct {
+	level   string
+	message string
+	context map[string]any
+}
+
+func (l *discoveryRecordingLogger) Debug(string, map[string]any) {}
+func (l *discoveryRecordingLogger) Info(message string, context map[string]any) {
+	l.entries = append(l.entries, discoveryLogEntry{level: "info", message: message, context: context})
+}
+func (l *discoveryRecordingLogger) Warn(message string, context map[string]any) {
+	l.entries = append(l.entries, discoveryLogEntry{level: "warn", message: message, context: context})
+}
+func (l *discoveryRecordingLogger) Error(message string, context map[string]any) {
+	l.entries = append(l.entries, discoveryLogEntry{level: "error", message: message, context: context})
+}
+
+func (l *discoveryRecordingLogger) hasInfo(message, loopID, reason string) bool {
+	for _, entry := range l.entries {
+		if entry.level != "info" || entry.message != message || entry.context["loopId"] != loopID {
+			continue
+		}
+		if text, _ := entry.context["reason"].(string); strings.Contains(text, reason) {
+			return true
+		}
+	}
+	return false
+}
+
 type discoveryTestForge struct {
 	GitHubGateway
 	state, head string
@@ -159,23 +194,26 @@ func TestDiscoveryDeliveryUsesLivePlannerState(t *testing.T) {
 func TestDiscoveryDeliveryHistory(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	for _, test := range []struct {
-		name, state, wantErr  string
+		name, state           string
+		wantUndecided         string
 		pr                    int64
 		unpublished, verified bool
 		wantRecovery, drift   bool
 	}{
 		{name: "explicitly unpublished", unpublished: true, wantRecovery: true},
 		{name: "closed unmerged", pr: 42, state: "closed", wantRecovery: true},
-		{name: "legacy merged without evidence", pr: 42, state: "merged", wantErr: "lacks completed implementation evidence"},
+		{name: "legacy merged without evidence", pr: 42, state: "merged", wantUndecided: "lacks completed implementation evidence"},
 		{name: "verified merged", pr: 42, state: "merged", verified: true},
-		{name: "legacy open without evidence", pr: 42, state: "open", wantErr: "lacks completed implementation evidence"},
+		{name: "legacy open without evidence", pr: 42, state: "open", wantUndecided: "lacks completed implementation evidence"},
 		{name: "verified open", pr: 42, state: "open", verified: true},
-		{name: "verified open head changed", pr: 42, state: "open", verified: true, drift: true, wantErr: "live head does not match"},
-		{name: "verified merged head changed", pr: 42, state: "merged", verified: true, drift: true, wantErr: "live head does not match"},
-		{name: "completed without evidence", wantErr: "no affirmative evidence"},
+		{name: "verified open head changed", pr: 42, state: "open", verified: true, drift: true, wantUndecided: "live head does not match"},
+		{name: "verified merged head changed", pr: 42, state: "merged", verified: true, drift: true, wantUndecided: "live head does not match"},
+		{name: "completed without evidence", wantUndecided: "no affirmative evidence"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f, r, g, project := prepareDeliveryDiscovery(t, test.state)
+			logs := &discoveryRecordingLogger{}
+			r.logger = logs
 			ctx := context.Background()
 			issue := IssueSummary{Number: 522}
 			input := discoveryTestInput(g, issue)
@@ -198,10 +236,30 @@ func TestDiscoveryDeliveryHistory(t *testing.T) {
 			}
 			old.MetadataJSON = stringPtr(mustMarshalJSON(meta))
 			putDeliveryDiscoveryLoop(t, f, old)
+			loopsBefore, err := f.repos.Loops.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queueBefore, err := f.repos.Queue.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
 			result, err := r.DiscoverIssues(ctx, input)
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) || len(result.QueueItems) != 0 {
-					t.Fatalf("result = %#v, %v; want %q", result, err, test.wantErr)
+			if test.wantUndecided != "" {
+				// An undecidable history refuses new work without failing discovery.
+				if err != nil || result.Skipped != 1 || len(result.QueueItems) != 0 || len(result.CreatedLoopIDs) != 0 {
+					t.Fatalf("result = %#v, %v; want a skip without error", result, err)
+				}
+				if !logs.hasInfo("worker discovery skipped an issue whose delivery history cannot be decided", old.ID, test.wantUndecided) {
+					t.Fatalf("missing undecided-history diagnostic for %q: %#v", test.wantUndecided, logs.entries)
+				}
+				loopsAfter, err := f.repos.Loops.List(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				queueAfter, err := f.repos.Queue.List(ctx)
+				if err != nil || len(loopsAfter) != len(loopsBefore) || len(queueAfter) != len(queueBefore) {
+					t.Fatalf("undecided history persisted state: loops %d->%d, queue %d->%d, %v", len(loopsBefore), len(loopsAfter), len(queueBefore), len(queueAfter), err)
 				}
 				return
 			}
@@ -233,8 +291,61 @@ func TestDiscoveryDeliveryHistory(t *testing.T) {
 			}
 			issue.Title = "changed fingerprint"
 			result, err = r.DiscoverIssues(ctx, discoveryTestInput(g, issue))
-			if err == nil || !strings.Contains(err.Error(), "already attempted") || len(result.QueueItems) != 0 {
-				t.Fatalf("second recovery = %#v, %v; budget exhausted", result, err)
+			// The recovery budget is spent: refuse another automatic attempt, but
+			// report it as an undecided history rather than a scheduler fault.
+			if err != nil || result.Skipped != 1 || len(result.QueueItems) != 0 || len(result.CreatedLoopIDs) != 0 {
+				t.Fatalf("second recovery = %#v, %v; want a skip without error", result, err)
+			}
+			if !logs.hasInfo("worker discovery skipped an issue whose delivery history cannot be decided", loop.ID, "already attempted") {
+				t.Fatalf("missing exhausted-recovery diagnostic: %#v", logs.entries)
+			}
+		})
+	}
+}
+
+// A Worker run that published without passing validation commands records a
+// delivery that is published but not complete. Production projects that run no
+// validation commands produce only this shape, so it must not fail the tick:
+// every later discovery would otherwise fail on the same unchanged history, and
+// only the undecided issue — not the rest of the project — may be skipped.
+func TestDiscoveryDeliveryPublishedWithoutValidationSkipsOnlyThatIssue(t *testing.T) {
+	for _, state := range []string{"open", "merged"} {
+		t.Run(state, func(t *testing.T) {
+			f, r, g, project := prepareDeliveryDiscovery(t, state)
+			logs := &discoveryRecordingLogger{}
+			r.logger = logs
+			ctx := context.Background()
+			head := strings.Repeat("c", 40)
+			g.head = head
+			published := IssueSummary{Number: 530, Labels: []string{issueDiscoveryLabel}}
+			fresh := IssueSummary{Number: 531, Labels: []string{issueDiscoveryLabel}}
+			g.issues = []IssueSummary{published, fresh}
+			record := delivery.Record{ProjectID: project.ID, Repo: discoveryTestRepo, WorkerLoopID: "published", RunID: "run_published", IssueNumber: published.Number, PRNumber: 42, BaseBranch: "main", HeadSHA: head, Commits: []string{head}, Published: true}
+			meta := map[string]any{"worker": map[string]any{"issueNumber": published.Number, "repo": discoveryTestRepo}, "implementationDelivery": record}
+			putDeliveryDiscoveryLoop(t, f, storage.LoopRecord{ID: "published", Type: "worker", Status: "completed", TargetType: "pull_request", TargetID: stringPtr(fmt.Sprintf("pr:%s:42", discoveryTestRepo)), PRNumber: int64Ptr(42), MetadataJSON: stringPtr(mustMarshalJSON(meta))})
+
+			for pass := 1; pass <= 2; pass++ {
+				result, err := r.DiscoverIssues(ctx, DiscoveryInput{ProjectID: project.ID, Repo: discoveryTestRepo})
+				if err != nil {
+					t.Fatalf("pass %d: discovery failed on an undecided delivery: %v", pass, err)
+				}
+				var queued []int64
+				for _, item := range result.QueueItems {
+					if !strings.HasSuffix(item.TargetID, fmt.Sprintf(":%d", fresh.Number)) {
+						t.Fatalf("pass %d: queued work for the undecided issue: %#v", pass, item)
+					}
+					queued = append(queued, fresh.Number)
+				}
+				if len(queued) != 1 || result.Skipped != 1 {
+					t.Fatalf("pass %d: want the other issue discovered and only the undecided one skipped: %#v", pass, result)
+				}
+			}
+			if !logs.hasInfo("worker discovery skipped an issue whose delivery history cannot be decided", "published", "lacks completed implementation evidence") {
+				t.Fatalf("missing undecided-history diagnostic: %#v", logs.entries)
+			}
+			loop, err := f.repos.Loops.GetByID(ctx, "published")
+			if err != nil || loop == nil || loop.Status != "completed" || derefString(loop.MetadataJSON) != mustMarshalJSON(meta) {
+				t.Fatalf("undecided history was modified: %#v, %v", loop, err)
 			}
 		})
 	}
