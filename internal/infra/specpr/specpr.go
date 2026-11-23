@@ -9,6 +9,10 @@ const (
 	ReviewingLabel  = "looper:spec-reviewing"
 	ReadyLabel      = "looper:spec-ready"
 	NeedsHumanLabel = "looper:needs-human"
+	// Only this generated summary is replaceable when a Worker implements on
+	// the same PR. The spec and source issue links remain outside the block.
+	ManagedPlanStart = "<!-- looper:planner-summary:start -->"
+	ManagedPlanEnd   = "<!-- looper:planner-summary:end -->"
 )
 
 type PullRequestPhase string
