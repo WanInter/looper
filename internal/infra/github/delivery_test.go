@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ func deliveryPRJSON(state string, merged bool, mergeSHA, headRepo string, change
 		headRepoJSON = fmt.Sprintf(`{"full_name":%q}`, headRepo)
 	}
 	return fmt.Sprintf(`{"number":7,"state":%q,"merged":%t,"merge_commit_sha":%q,"changed_files":%d,
-"base":{"ref":"main","sha":"aaaa","repo":{"full_name":"Acme/Looper"}},
+"labels":[{"name":"looper:hold"}],"base":{"ref":"main","sha":"aaaa","repo":{"full_name":"Acme/Looper"}},
 "head":{"ref":"looper/issue-7","sha":%q,"repo":%s}}`, state, merged, mergeSHA, changedFiles, deliveryHeadSHA, headRepoJSON)
 }
 
@@ -78,8 +79,8 @@ func TestDeliveryPullRequestMergedVariantsUseCanonicalMergeCommit(t *testing.T) 
 			if err != nil {
 				t.Fatalf("DeliveryPullRequest() error = %v", err)
 			}
-			want := delivery.PullRequest{Number: 7, State: delivery.PullRequestMerged, BaseBranch: "main", HeadSHA: deliveryHeadSHA, MergeSHA: deliveryMergeSHA, Repo: "acme/looper", HeadBranch: "looper/issue-7", BaseContainsMerge: true}
-			if got != want {
+			want := delivery.PullRequest{Number: 7, State: delivery.PullRequestMerged, BaseBranch: "main", HeadSHA: deliveryHeadSHA, MergeSHA: deliveryMergeSHA, Repo: "acme/looper", HeadBranch: "looper/issue-7", Labels: []string{"looper:hold"}, BaseContainsMerge: true}
+			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("DeliveryPullRequest() = %#v, want %#v", got, want)
 			}
 			for _, call := range runner.calls {

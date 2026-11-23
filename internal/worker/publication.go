@@ -123,7 +123,9 @@ func publicationBody(body string, w workerInput, d delivery.Record, e *checkpoin
 		block += "\nSpec: " + d.SpecPath
 	}
 	if d.ValidationRef != "" {
-		block += "\nValidation: `" + d.ValidationRef + "`"
+		block += "\nValidation: configured checks passed on this head (run `" + d.ValidationRef + "`)."
+	} else {
+		block += "\nValidation: no passing checks recorded for this head."
 	}
 	if len(d.Commits) > 0 {
 		block += "\nImplementation commits: `" + strings.Join(d.Commits, "`, `") + "`"

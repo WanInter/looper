@@ -109,6 +109,7 @@ type defaultSchedulerTickInput struct {
 	RequestSchedulerWake     func()
 	Planner                  plannerScheduler
 	Coordinator              coordinatorScheduler
+	ReconcileDeliveries      func(context.Context, coordinatorrole.DiscoveryInput) error
 	Reviewer                 reviewerScheduler
 	Fixer                    fixerScheduler
 	Worker                   workerScheduler
@@ -2950,7 +2951,16 @@ func (a workerGitHubAdapter) ViewPullRequest(ctx context.Context, input worker.V
 		if err != nil {
 			return worker.PullRequestDetail{}, err
 		}
-		return worker.PullRequestDetail{Number: pr.Number, Title: pr.Title, Body: pr.Body, URL: pr.HTMLURL, State: pr.State, HeadRefName: pr.Head.Name, BaseRefName: pr.Base.Name, HeadSHA: pr.Head.SHA, Labels: forgeLabelNames(pr.Labels)}, nil
+		state := pr.State
+		if strings.EqualFold(state, "closed") {
+			if pr.Merged == nil {
+				return worker.PullRequestDetail{}, fmt.Errorf("Forgejo did not report whether closed PR %s#%d was merged", input.Repo, input.PRNumber)
+			}
+			if *pr.Merged {
+				state = "merged"
+			}
+		}
+		return worker.PullRequestDetail{Number: pr.Number, Title: pr.Title, Body: pr.Body, URL: pr.HTMLURL, State: state, HeadRefName: pr.Head.Name, BaseRefName: pr.Base.Name, HeadSHA: pr.Head.SHA, Labels: forgeLabelNames(pr.Labels)}, nil
 	}
 	if a.gateway == nil {
 		return worker.PullRequestDetail{}, fmt.Errorf("github gateway is not configured")
@@ -3223,11 +3233,11 @@ func (a workerGitAdapter) PrepareWorktree(ctx context.Context, input worker.Prep
 }
 
 func (a workerGitAdapter) InspectHead(ctx context.Context, input worker.InspectHeadInput) (worker.InspectHeadResult, error) {
-	result, err := a.gateway.InspectHead(ctx, gitinfra.InspectHeadInput{RepoPath: input.RepoPath, WorktreeRoot: input.WorktreeRoot, WorktreePath: input.WorktreePath, BaseRef: input.BaseRef})
+	result, err := a.gateway.InspectHead(ctx, gitinfra.InspectHeadInput{RepoPath: input.RepoPath, WorktreeRoot: input.WorktreeRoot, WorktreePath: input.WorktreePath, BaseRef: input.BaseRef, IncludeCommittedFiles: true})
 	if err != nil {
 		return worker.InspectHeadResult{}, err
 	}
-	return worker.InspectHeadResult{HeadSHA: result.HeadSHA, NewCommitSHAs: result.NewCommitSHAs, HasUncommittedChanges: result.HasUncommittedChanges, ChangedFiles: result.ChangedFiles}, nil
+	return worker.InspectHeadResult{HeadSHA: result.HeadSHA, NewCommitSHAs: result.NewCommitSHAs, HasUncommittedChanges: result.HasUncommittedChanges, ChangedFiles: result.ChangedFiles, CommittedFiles: result.CommittedFiles}, nil
 }
 
 func (a workerGitAdapter) Commit(ctx context.Context, input worker.CommitInput) (worker.CommitResult, error) {
@@ -3536,7 +3546,6 @@ func buildDefaultSchedulerHandlersWithOptions(cfg config.Config, configPath stri
 	}
 
 	var plannerRunner plannerScheduler
-	var coordinatorRunner coordinatorScheduler
 	var reviewerRunner reviewerScheduler
 	var fixerRunner fixerScheduler
 	var workerRunner workerScheduler
@@ -3695,7 +3704,7 @@ func buildDefaultSchedulerHandlersWithOptions(cfg config.Config, configPath stri
 	} else if logger != nil {
 		logger.Warn("coordinator triage LLM skipped: global agent.vendor is not configured", nil)
 	}
-	coordinatorRunner = coordinatorrole.New(coordinatorOpts)
+	coordinatorRunner := coordinatorrole.New(coordinatorOpts)
 
 	resolvedReviewer, reviewerConfigured := config.ResolveAgent(cfg, "", config.CodingRoleReviewer)
 	{
@@ -3915,6 +3924,7 @@ func buildDefaultSchedulerHandlersWithOptions(cfg config.Config, configPath stri
 			RequestSchedulerWake: requestWake,
 			Planner:              plannerRunner,
 			Coordinator:          coordinatorRunner,
+			ReconcileDeliveries:  coordinatorRunner.ReconcileDeliveries,
 			Reviewer:             reviewerRunner,
 			Fixer:                fixerRunner,
 			Worker:               workerRunner,
@@ -4135,6 +4145,17 @@ func runDefaultSchedulerTick(ctx context.Context, input defaultSchedulerTickInpu
 			}
 			continue
 		}
+		// This handoff also serves projects that do not use Coordinator triage.
+		// Do not borrow a discovery snapshot: close/handoff need live forge state.
+		if input.ReconcileDeliveries != nil && schedulerDeliveryEnabled(input.Config, project.ID) {
+			if err := admissionRefuseWork(input); err != nil {
+				break
+			}
+			appendErr(runSchedulerLane(input, "delivery reconciliation", project.ID, repo, func() error {
+				err := input.ReconcileDeliveries(ctx, coordinatorrole.DiscoveryInput{ProjectID: project.ID, Repo: repo})
+				return wrapSchedulerError("delivery reconciliation", project.ID, repo, err)
+			}))
+		}
 		if input.Planner != nil && discoveryEnabled(input.PlannerDiscoveryEnabled) {
 			if err := admissionRefuseWork(input); err != nil {
 				break
@@ -4258,6 +4279,18 @@ func coordinatorEnabledForProject(input defaultSchedulerTickInput, projectID str
 		return false
 	}
 	return input.CoordinatorEnabled(projectID)
+}
+
+func schedulerDeliveryEnabled(cfg *config.Config, projectID string) bool {
+	if cfg == nil {
+		return false
+	}
+	p, ok := runtimeProjectBinding(*cfg, projectID)
+	if !ok || p.Network.Mode == config.NetworkModeRouted || config.ResolvedProjectProviderKind(*cfg, p) != config.ProviderKindGitHub {
+		return false
+	}
+	roles := config.ProjectRoleConfigs(*cfg, projectID)
+	return roles.Worker.AutoDiscovery && roles.Reviewer.Behavior.ReviewEvents.AutoImplement
 }
 
 func projectDiscoverySnapshotOptions(input defaultSchedulerTickInput, projectID string) githubinfra.DiscoverySnapshotOptions {

@@ -44,6 +44,7 @@ func (g *Gateway) DeliveryPullRequest(ctx context.Context, repo string, pr int64
 		BaseBranch: nestedString(row, "base", "ref"),
 		HeadBranch: nestedString(row, "head", "ref"),
 		HeadSHA:    nestedString(row, "head", "sha"),
+		Labels:     extractLabelNames(row["labels"]),
 	}
 	state := strings.ToLower(asString(row["state"]))
 	merged, known := row["merged"].(bool)

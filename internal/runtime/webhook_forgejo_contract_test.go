@@ -287,18 +287,26 @@ func TestForgejoWebhookIngressCreatesRoleQueuesWithoutPollingOrGH(t *testing.T) 
 		t.Fatal(err)
 	}
 	types := []string{}
+	workerTargets := []string{}
 	for _, loop := range loops {
 		types = append(types, loop.Type)
+		if loop.Type == "worker" {
+			workerTargets = append(workerTargets, derefString(loop.TargetID))
+		}
+	}
+	sort.Strings(workerTargets)
+	if !reflect.DeepEqual(workerTargets, []string{"issue:acme/app:11", "issue:acme/app:9"}) {
+		t.Fatalf("worker targets = %v, want the unassigned and own issues only", workerTargets)
 	}
 	sort.Strings(types)
-	if !reflect.DeepEqual(types, []string{"fixer", "planner", "reviewer", "worker"}) {
+	if !reflect.DeepEqual(types, []string{"fixer", "planner", "reviewer", "worker", "worker"}) {
 		t.Fatalf("webhook-created loops = %#v (types %v)", loops, types)
 	}
 	queue, err := repos.Queue.ListQueued(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(queue) != 4 || wakes.Load() < 4 {
+	if len(queue) != len(loops) || wakes.Load() < 4 {
 		t.Fatalf("queue=%d wakes=%d, want each role enqueued and claimer woken", len(queue), wakes.Load())
 	}
 	// An Actions completion has a nested repository and reuses the real PR
@@ -319,7 +327,7 @@ func TestForgejoWebhookIngressCreatesRoleQueuesWithoutPollingOrGH(t *testing.T) 
 	}
 	waitForgejoRuntimeForwarder(t, handlers.webhook, 11)
 	loops, _ = repos.Loops.List(context.Background())
-	if len(loops) != 4 {
+	if len(loops) != len(types) {
 		t.Fatalf("duplicate loops after Actions: %d", len(loops))
 	}
 }

@@ -62,7 +62,11 @@ func TestHostingIdentityRoleDiscoveryUsesSelectedForgejoAccount(t *testing.T) {
 				http.Error(w, "denied planner-token", http.StatusForbidden)
 				return
 			}
-			_ = json.NewEncoder(w).Encode([]any{map[string]any{"number": 27, "title": "Implement selected identity", "state": "open", "assignees": []any{map[string]any{"login": actor}}, "labels": []any{map[string]any{"name": "ready"}}}})
+			labels := []any{map[string]any{"name": "ready"}}
+			_ = json.NewEncoder(w).Encode([]any{
+				map[string]any{"number": 27, "title": "Implement selected identity", "state": "open", "assignees": []any{map[string]any{"login": actor}}, "labels": labels},
+				map[string]any{"number": 28, "title": "Assigned to a different account", "state": "open", "assignees": []any{map[string]any{"login": "someone-else"}}, "labels": labels},
+			})
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -119,7 +123,9 @@ func TestHostingIdentityRoleDiscoveryUsesSelectedForgejoAccount(t *testing.T) {
 	mu.Lock()
 	gotFilters := strings.Join(filters, ",")
 	mu.Unlock()
-	if gotFilters != "planner-bot:planner-bot,worker-bot:worker-bot" {
+	// Omit the remote assignee filter to also discover unassigned work;
+	// the distinct bound identities still control the local claim decision.
+	if gotFilters != "planner-bot:,worker-bot:" || plan.QueueItems[0].TargetID != "issue:acme/looper:27" || work.QueueItems[0].TargetID != "issue:acme/looper:27" {
 		t.Fatalf("role discovery actor filters = %q", gotFilters)
 	}
 	reviewing := reviewer.New(reviewer.Options{DB: db.DB(), Repos: repos, GitHub: reviewerGitHubAdapter{config: &cfg}, CustomInstructions: &cfg})

@@ -20,5 +20,6 @@ type PullRequest struct {
 	MergeSHA          string
 	Repo              string
 	HeadBranch        string
+	Labels            []string
 	BaseContainsMerge bool
 }
