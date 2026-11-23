@@ -2020,14 +2020,14 @@ func noRemoteLifecyclePromptInstruction(runner, branch, baseBranch string, discl
 }
 
 func buildPullRequestBody(issue checkpointIssue, worktree checkpointWorktree, writeSpec *checkpointWriteSpec) string {
-	lines := []string{"## Summary", fmt.Sprintf("- Adds the planning spec for %s#%d", issue.Repo, issue.IssueNumber), "- Spec path: " + issue.SpecPath, "- Planner branch: " + worktree.Branch}
+	lines := []string{specpr.ManagedPlanStart, "## Summary", fmt.Sprintf("- Adds the planning spec for %s#%d", issue.Repo, issue.IssueNumber), "- Spec path: " + issue.SpecPath, "- Planner branch: " + worktree.Branch}
 	if issue.URL != "" {
 		lines = append(lines, "- Source issue: "+issue.URL)
 	}
 	if writeSpec != nil && strings.TrimSpace(writeSpec.Summary) != "" {
 		lines = append(lines, "", "## Agent Summary", writeSpec.Summary)
 	}
-	lines = append(lines, "", "Spec: "+issue.SpecPath, fmt.Sprintf("Issue: %s#%d", issue.Repo, issue.IssueNumber))
+	lines = append(lines, specpr.ManagedPlanEnd, "", "Spec: "+issue.SpecPath, fmt.Sprintf("Issue: %s#%d", issue.Repo, issue.IssueNumber))
 	return strings.Join(lines, "\n")
 }
 

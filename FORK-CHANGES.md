@@ -56,6 +56,14 @@
 - Reviewer 续跑仍检查 PR HEAD 和工作树，仅清理原有保留命名空间的临时评审产物。有普通改动则保留并报告阻塞路径；已准备的同一 checkout 若新添了本地 commit，也不会为续跑而重置。
 - 验证：`TestRuntimeRestartJoinsAgentFinalizationBeforeRequeue` 用临时 SQLite 和带子进程的假 OpenCode 验证停机等待、检查点、重复恢复及单次认领；`TestStartupRecoveryExitedLeaderDoesNotConfirmDeadOrAct` 覆盖未知 containment；`TestRunPrepareWorktreeStepRealGateway*` 用本地 Git 验证临时产物和本地编辑的处理。
 
+## 9. 规划合并、Worker 交付与 issue 收尾
+
+- GitHub 项目启用 `roles.reviewer.behavior.reviewEvents.autoImplement` 与 Worker 自动发现后，交接依据是本地 Planner 与 issue、PR 的持久关联，以及远端的合并结果、目标分支和实际规格文件。已合并的规划 PR 不接受后续推送；规格交付本身不会关闭 issue。人工暂停、归档项目不自动推进。
+- Worker 创建实现 PR 和推送至既有 PR 使用同一交付记录。PR 正文使用 `Refs`，规格链接和人工正文保留；只有 Looper 管理的段落会被替换。`implementationDelivery` 放在既有 loop metadata / run checkpoint，无需迁移数据库。旧运行没有可核验的证据时不会被补记为完整交付。
+- 完整解决须绑定唯一 issue、已交付的 HEAD、实际实现提交及该版本的验证结果。`completed` 只描述本地运行。收尾按实际合入目标分支的结果处理（包含 squash/rebase）；部分实现、仅文档、未知或有冲突的关联不自动关单。采用独立的合并事实与收尾进度，是为了在正文、标签或关闭请求失败后续办；代价是需要保留并检查旧 checkpoint 的兼容和重试路径。
+- 运维核对：查看 issue 是否仍开放、是否 hold、已绑定 PR 的合并目标和交付 HEAD，再检查对应 Worker 的活跃队列及验证记录。`looper:worker-ready` 已存在只代表可被发现；不能据此认定已派单或已交付。功能不需要也不建议通过手改 SQLite 或回填旧运行的 `complete` 来启用。
+- 验证：`go test ./...`、`go vet ./...` 和 `go build ./...`；`go test -race ./internal/runtime -run '^TestVerifiedIssueDeliveryLifecycle$' -count=1 -v` 在临时 SQLite、真实 Git 裸远端及模拟 GitHub 上跑通“已合并规格 → 唯一 Worker → 验证并发布 → 人工合并 → 重启后只关闭一次，清理阶段标签”。`TestPublicationResumesAfterReadbackFailure` 检查正文重试不重跑模型或重复提交。未在业务仓执行写入型沙箱测试、未接入生产 daemon。
+
 ## 建议
 - **1（opencode `--dir`）** 与 **4（reviewer 转换）** 更像**通用缺陷**，值得提 **upstream PR** 给 `nexu-io/looper`（多账号/他人也可受益）。
 - **2、3、5** 偏单账号 / 自建工作流（5 为工作流增强），可按需 upstream 或不提。

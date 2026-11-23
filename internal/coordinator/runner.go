@@ -110,12 +110,16 @@ type RuntimeState struct {
 	mu                sync.Mutex
 	lastTickByProject map[string]time.Time
 	watchLocks        map[string]*sync.Mutex
+	// deliveryCursors keeps the fair-scan position per project, repository and
+	// loop type. It is advisory: losing it on restart only restarts the scan.
+	deliveryCursors map[string]storage.DeliveryCandidateCursor
 }
 
 func NewRuntimeState() *RuntimeState {
 	return &RuntimeState{
 		lastTickByProject: map[string]time.Time{},
 		watchLocks:        map[string]*sync.Mutex{},
+		deliveryCursors:   map[string]storage.DeliveryCandidateCursor{},
 	}
 }
 

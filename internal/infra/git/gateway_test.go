@@ -131,7 +131,7 @@ func TestGatewayCreatesRestoresAndCleansWorktreesWithBranchProtection(t *testing
 	if err != nil {
 		t.Fatalf("Commit() error = %v", err)
 	}
-	inspectAfterCommit, err := gateway.InspectHead(ctx, InspectHeadInput{WorktreePath: worktree.WorktreePath, BaseRef: prepared.HeadSHA})
+	inspectAfterCommit, err := gateway.InspectHead(ctx, InspectHeadInput{WorktreePath: worktree.WorktreePath, BaseRef: prepared.HeadSHA, IncludeCommittedFiles: true})
 	if err != nil {
 		t.Fatalf("InspectHead(after) error = %v", err)
 	}
@@ -156,6 +156,9 @@ func TestGatewayCreatesRestoresAndCleansWorktreesWithBranchProtection(t *testing
 	}
 	if len(inspectAfterCommit.NewCommitSHAs) != 1 {
 		t.Fatalf("InspectHead(after).NewCommitSHAs = %#v, want 1 entry", inspectAfterCommit.NewCommitSHAs)
+	}
+	if len(inspectAfterCommit.CommittedFiles) != 1 || inspectAfterCommit.CommittedFiles[0] != "README.md" || len(inspectAfterCommit.ChangedFiles) != 0 {
+		t.Fatalf("committed paths on clean checkout = %#v", inspectAfterCommit)
 	}
 	commitAuthor := stringsTrimSpace(runGit(t, worktree.WorktreePath, "log", "-1", "--format=%an <%ae>"))
 	if commitAuthor != "Looper Test <test@example.com>" {
