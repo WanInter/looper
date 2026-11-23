@@ -5650,6 +5650,11 @@ func TestProcessClaimedItemHandsOffSpecToImplementationWhenAutoImplement(t *test
 	prNumber := int64(42)
 	metadata := `{"followUpdates":true,"loop":{"enabled":true}}`
 	loop := storage.LoopRecord{ID: "loop_auto_implement_spec", Seq: 1, ProjectID: "project_1", Type: "reviewer", TargetType: "pull_request", Repo: &repo, PRNumber: &prNumber, Status: "queued", MetadataJSON: &metadata, CreatedAt: nowISO, UpdatedAt: nowISO}
+	planned := storage.LoopRecord{ID: "planner_21", Seq: 2, ProjectID: loop.ProjectID, Type: "planner", TargetType: "issue", TargetID: stringPtr("issue:acme/looper:21"), Repo: &repo, PRNumber: &prNumber, Status: "completed", MetadataJSON: stringPtr(`{"issueNumber":21,"prNumber":42}`), CreatedAt: nowISO, UpdatedAt: nowISO}
+	if err := fixture.repos.Loops.Upsert(ctx, planned); err != nil {
+		t.Fatal(err)
+	}
+	github.viewBody = "Refs #999" // A human edit must not redirect the handoff.
 	if err := fixture.repos.Loops.Upsert(ctx, loop); err != nil {
 		t.Fatalf("Loops.Upsert() error = %v", err)
 	}
@@ -5679,33 +5684,16 @@ func TestProcessClaimedItemHandsOffSpecToImplementationWhenAutoImplement(t *test
 	}
 }
 
-func TestParseSpecLinkedIssue(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name   string
-		body   string
-		head   string
-		want   linkedIssueReference
-		wantOK bool
-	}{
-		{name: "refs", body: "Refs #21", want: linkedIssueReference{Repo: "acme/looper", Number: 21}, wantOK: true},
-		{name: "refs cross repo", body: "Refs acme/other#7", want: linkedIssueReference{Repo: "acme/other", Number: 7}, wantOK: true},
-		{name: "closes", body: "Closes #9", want: linkedIssueReference{Repo: "acme/looper", Number: 9}, wantOK: true},
-		{name: "branch fallback", head: "looper/planner/33-p1-foo", want: linkedIssueReference{Repo: "acme/looper", Number: 33}, wantOK: true},
-		{name: "none", body: "no reference here", wantOK: false},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := parseSpecLinkedIssue("acme/looper", tc.body, tc.head)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if ok && got != tc.want {
-				t.Fatalf("got = %#v, want %#v", got, tc.want)
-			}
-		})
+func TestPlannerHandoffRequiresUniqueUnheldIssue(t *testing.T) {
+	repo, pr := "acme/looper", int64(42)
+	plan := storage.LoopRecord{ProjectID: "p", Type: "planner", TargetType: "issue", TargetID: stringPtr("issue:acme/looper:21"), Repo: &repo, PRNumber: &pr, MetadataJSON: stringPtr(`{"issueNumber":21,"prNumber":42}`)}
+	other := plan
+	other.TargetID, other.MetadataJSON = stringPtr("issue:acme/looper:22"), stringPtr(`{"issueNumber":22,"prNumber":42}`)
+	paused := storage.LoopRecord{ProjectID: "p", Type: "fixer", Status: "paused", Repo: &repo, PRNumber: &pr}
+	for _, records := range [][]storage.LoopRecord{nil, {plan, other}, {plan, paused}} {
+		if got, ok := plannerHandoffIssue(records, "p", repo, pr); ok {
+			t.Fatalf("unexpected handoff: %#v", got)
+		}
 	}
 }
 

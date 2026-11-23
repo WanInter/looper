@@ -70,15 +70,6 @@ var reviewHumanHTMLCommentPattern = regexp.MustCompile(`(?s)<!--.*?-->`)
 var reviewHumanReferenceDefinitionPattern = regexp.MustCompile(`(?m)^\s{0,3}\[[^\]\n]+\]:[^\n]*(?:\n[ \t]+[^\n]*)*`)
 var reviewerIssueClosingReferencePattern = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+)\b`)
 
-// reviewerSpecIssueReferencePattern matches the reference the Planner writes into
-// a spec PR body ("Refs #N", also tolerating Closes/Fixes/Resolves) so the
-// spec-ready transition can find the issue to hand off for implementation.
-var reviewerSpecIssueReferencePattern = regexp.MustCompile(`(?i)\b(?:refs?|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+)\b`)
-
-// reviewerPlannerBranchPattern extracts the issue number from a Planner branch
-// name such as "looper/planner/21-p2-wal-checkpoint" as a fallback.
-var reviewerPlannerBranchPattern = regexp.MustCompile(`^looper/planner/(\d+)(?:$|[-/._])`)
-
 const (
 	reviewerNativeResumeMetadataKey      = "reviewerNativeResume"
 	reviewerNativeResumeReasonHeadChange = "head_change"
@@ -6209,22 +6200,20 @@ const (
 	specReadyPlanTriggerLabel   = "looper:plan"
 )
 
-func parseSpecLinkedIssue(defaultRepo, body, headRef string) (linkedIssueReference, bool) {
-	if match := reviewerSpecIssueReferencePattern.FindStringSubmatch(body); len(match) == 2 {
-		if repo, number, ok := splitIssueReference(defaultRepo, strings.TrimSpace(match[1])); ok {
-			return linkedIssueReference{Repo: repo, Number: number}, true
-		}
-	}
-	if match := reviewerPlannerBranchPattern.FindStringSubmatch(strings.TrimSpace(headRef)); len(match) == 2 {
-		if number, err := parseInt64(match[1]); err == nil && number > 0 {
-			return linkedIssueReference{Repo: defaultRepo, Number: number}, true
-		}
-	}
-	return linkedIssueReference{}, false
-}
-
 func (r *Runner) handoffSpecReadyForImplementation(ctx context.Context, input stepInput, detail PullRequestDetail) error {
-	issueRef, ok := parseSpecLinkedIssue(input.Repo, detail.Body, detail.HeadRefName)
+	// A late review retry is not authority to dispatch work for a merged PR.
+	// The delivery reconciler handles it using the persisted planner binding.
+	if !strings.EqualFold(detail.State, "open") || domain.IsAutoLaneHeld(domain.LoopTypeReviewer, detail.Labels) {
+		return nil
+	}
+	if r.repos == nil || r.repos.Loops == nil || input.Project.Archived {
+		return nil
+	}
+	associated, err := r.repos.Loops.ListByRepoAndPR(ctx, input.Repo, input.PRNumber)
+	if err != nil {
+		return err
+	}
+	issueRef, ok := plannerHandoffIssue(associated, input.Project.ID, input.Repo, input.PRNumber)
 	if !ok {
 		return nil
 	}
@@ -6235,7 +6224,7 @@ func (r *Runner) handoffSpecReadyForImplementation(ctx context.Context, input st
 		}
 		return &loopError{message: fmt.Sprintf("Failed to view linked issue %s#%d for spec-ready handoff: %v", issueRef.Repo, issueRef.Number, err), kind: FailureRetryableAfterResume}
 	}
-	if freshIssue.IsPullRequest {
+	if freshIssue.IsPullRequest || freshIssue.Number != issueRef.Number || !strings.EqualFold(freshIssue.State, "open") || domain.IsAutoLaneHeld(domain.LoopTypeWorker, freshIssue.Labels) {
 		return nil
 	}
 	add := make([]string, 0, 2)
@@ -6261,6 +6250,30 @@ func (r *Runner) handoffSpecReadyForImplementation(ctx context.Context, input st
 		}
 	}
 	return nil
+}
+
+// A spec PR body (including its Refs line) may be edited by anyone with
+// repository write access. Only the Planner's persisted target authorizes
+// changing the issue's dispatch labels.
+func plannerHandoffIssue(associated []storage.LoopRecord, projectID, repo string, pr int64) (linkedIssueReference, bool) {
+	var number int64
+	for _, l := range associated {
+		if l.ProjectID != projectID || l.PRNumber == nil || *l.PRNumber != pr || !strings.EqualFold(derefString(l.Repo), repo) {
+			continue
+		}
+		if (l.Type == "reviewer" || l.Type == "fixer") && (loops.IsReviewFixPairHold(l) || loops.HasPendingReviewScopeHuman(l) || l.Status == "human_takeover" || l.Status == "paused" || l.Status == "awaiting_human") {
+			return linkedIssueReference{}, false
+		}
+		if l.Type != "planner" || l.TargetType != "issue" {
+			continue
+		}
+		var m struct{ IssueNumber, PRNumber int64 }
+		if l.MetadataJSON == nil || json.Unmarshal([]byte(*l.MetadataJSON), &m) != nil || m.IssueNumber <= 0 || m.PRNumber != pr || !strings.EqualFold(derefString(l.TargetID), fmt.Sprintf("issue:%s:%d", repo, m.IssueNumber)) || (number != 0 && number != m.IssueNumber) {
+			return linkedIssueReference{}, false
+		}
+		number = m.IssueNumber
+	}
+	return linkedIssueReference{Repo: repo, Number: number}, number > 0
 }
 
 func (r *Runner) reviewerPublishFreshDetailForMutation(ctx context.Context, input stepInput, action string) (PullRequestDetail, error) {
