@@ -89,10 +89,11 @@ type PrepareWorktreeResult struct {
 }
 
 type InspectHeadInput struct {
-	RepoPath     string
-	WorktreeRoot string
-	WorktreePath string
-	BaseRef      string
+	RepoPath              string
+	WorktreeRoot          string
+	WorktreePath          string
+	BaseRef               string
+	IncludeCommittedFiles bool
 }
 
 type InspectHeadResult struct {
@@ -100,6 +101,7 @@ type InspectHeadResult struct {
 	NewCommitSHAs         []string
 	HasUncommittedChanges bool
 	ChangedFiles          []string
+	CommittedFiles        []string
 }
 
 type CommitInput struct {
@@ -779,10 +781,23 @@ func (g *Gateway) InspectHead(ctx context.Context, input InspectHeadInput) (Insp
 	}
 
 	newCommitSHAs := []string{}
+	var committedFiles []string
 	if input.BaseRef != "" {
 		newCommitSHAs, err = g.listCommitsSince(ctx, input.WorktreePath, input.BaseRef)
 		if err != nil {
 			return InspectHeadResult{}, err
+		}
+		if input.IncludeCommittedFiles && len(newCommitSHAs) > 0 {
+			diff, err := g.runGitResult(ctx, input.WorktreePath, nil, "diff", "--no-ext-diff", "--name-only", "-z", input.BaseRef+"..."+headSHA, "--")
+			if err != nil {
+				return InspectHeadResult{}, err
+			}
+			if diff.StdoutTruncated {
+				return InspectHeadResult{}, fmt.Errorf("committed file list truncated for %s", headSHA)
+			}
+			if paths := strings.TrimSuffix(diff.Stdout, "\x00"); paths != "" {
+				committedFiles = strings.Split(paths, "\x00")
+			}
 		}
 	}
 
@@ -801,6 +816,7 @@ func (g *Gateway) InspectHead(ctx context.Context, input InspectHeadInput) (Insp
 		NewCommitSHAs:         newCommitSHAs,
 		HasUncommittedChanges: len(status) > 0,
 		ChangedFiles:          changedFiles,
+		CommittedFiles:        committedFiles,
 	}, nil
 }
 
