@@ -58,6 +58,24 @@ func (d *deliveryReconciler) reconcileImplementation(ctx context.Context, loop s
 	}
 	if !validated {
 		state.Outcome, state.Reason = "ignored", "unverified-validation-reference"
+		// The marker below is terminal for this head, so this line is the only
+		// operator-visible signal that the issue will not close itself. Name the
+		// cause: a project that runs no validation commands records no reference
+		// at all, while a recorded reference that no longer resolves is an anomaly.
+		detail := "the recorded validation reference does not resolve to a passing checkpoint on this head"
+		if strings.TrimSpace(record.ValidationRef) == "" {
+			detail = "no validation reference was recorded for this delivery"
+		}
+		if d.runner.logger != nil {
+			d.runner.logger.Warn("worker delivery cannot close its issue automatically", map[string]any{
+				"loopId":      loop.ID,
+				"repo":        d.repo,
+				"issueNumber": record.IssueNumber,
+				"prNumber":    record.PRNumber,
+				"headSha":     record.HeadSHA,
+				"detail":      detail,
+			})
+		}
 		return d.markDone(ctx, loop, state, nil)
 	}
 

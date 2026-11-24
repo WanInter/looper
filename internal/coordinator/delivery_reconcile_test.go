@@ -157,9 +157,33 @@ type deliveryFixture struct {
 	cfg    *config.Config
 	now    time.Time
 	runner *Runner
+	logger *deliveryRecordingLogger
 
 	runClock int
 }
+
+// deliveryRecordingLogger captures the operator-visible diagnostics the
+// delivery reconciler emits for deliveries it cannot verify.
+type deliveryRecordingLogger struct {
+	entries []map[string]any
+	details []string
+}
+
+func (l *deliveryRecordingLogger) Debug(string, map[string]any) {}
+func (l *deliveryRecordingLogger) Info(string, map[string]any)  {}
+func (l *deliveryRecordingLogger) Error(string, map[string]any) {}
+func (l *deliveryRecordingLogger) Warn(message string, context map[string]any) {
+	entry := map[string]any{"message": message}
+	for key, value := range context {
+		entry[key] = value
+	}
+	l.entries = append(l.entries, entry)
+	if detail, _ := context["detail"].(string); detail != "" {
+		l.details = append(l.details, detail)
+	}
+}
+
+func (l *deliveryRecordingLogger) warnings() int { return len(l.entries) }
 
 func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	t.Helper()
@@ -186,14 +210,14 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	cfg.Roles.Reviewer.Behavior.ReviewEvents.AutoImplement = true
 	gh := newFakeDeliveryGitHub()
 	gh.issues[deliveryTestIssue] = &githubinfra.IssueDetail{Number: deliveryTestIssue, State: "open", Labels: []string{"triaged", "dispatch/plan", "looper:plan"}}
-	f := &deliveryFixture{t: t, ctx: ctx, repos: repos, gh: gh, cfg: &cfg, now: now}
+	f := &deliveryFixture{t: t, ctx: ctx, repos: repos, gh: gh, cfg: &cfg, now: now, logger: &deliveryRecordingLogger{}}
 	f.restart()
 	return f
 }
 
 // restart drops every in-memory coordinator state, as a daemon restart would.
 func (f *deliveryFixture) restart() {
-	f.runner = New(Options{Repos: f.repos, GitHub: f.gh, Config: f.cfg, Now: func() time.Time { return f.now }})
+	f.runner = New(Options{Repos: f.repos, GitHub: f.gh, Config: f.cfg, Logger: f.logger, Now: func() time.Time { return f.now }})
 }
 
 func (f *deliveryFixture) reconcile() error {
@@ -824,6 +848,48 @@ func TestReconcileDeliveriesReplacementPRReopensCandidate(t *testing.T) {
 	}
 	if !slices.Contains(f.issueLabels(), "looper:worker-ready") {
 		t.Fatalf("replacement PR did not hand off: %v", f.issueLabels())
+	}
+}
+
+// A delivery whose validation cannot be verified is a terminal outcome for its
+// head, so the reconciler must name the reason exactly once instead of leaving
+// the issue open with no operator-visible signal.
+func TestReconcileDeliveriesUnverifiedValidationWarnsOncePerHead(t *testing.T) {
+	for _, test := range []struct {
+		name, validationRef, wantDetail string
+	}{
+		{name: "no reference recorded", validationRef: "", wantDetail: "no validation reference was recorded for this delivery"},
+		{name: "reference does not resolve", validationRef: "missing-run:validate", wantDetail: "the recorded validation reference does not resolve to a passing checkpoint on this head"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			record := deliveryRecord("worker-1", "worker-1-B", "worker-1-A", false)
+			record.ValidationRef = test.validationRef
+			loop := f.seedWorker("worker-1", "completed", record)
+			f.mergeImpl(deliveryHeadB, deliveryMerge)
+			f.mustReconcile()
+			if state := f.reconcileState(loop.ID); !state.Done || state.Reason != "unverified-validation-reference" {
+				t.Fatalf("state = %+v", state)
+			}
+			if f.logger.warnings() != 1 || len(f.logger.details) != 1 || f.logger.details[0] != test.wantDetail {
+				t.Fatalf("warnings = %#v; want one with %q", f.logger.entries, test.wantDetail)
+			}
+			warning := f.logger.entries[0]
+			if warning["loopId"] != loop.ID || warning["issueNumber"] != deliveryTestIssue || warning["prNumber"] != deliveryTestImplPR || warning["headSha"] != deliveryHeadB {
+				t.Fatalf("warning does not identify the delivery: %#v", warning)
+			}
+			if len(f.gh.closeCalls) != 0 {
+				t.Fatalf("unverified delivery closed the issue: %v", f.gh.closeCalls)
+			}
+			// The marker stops the candidate from being reconsidered, so repeated
+			// ticks and a daemon restart do not repeat the warning.
+			f.mustReconcile()
+			f.restart()
+			f.mustReconcile()
+			if f.logger.warnings() != 1 {
+				t.Fatalf("warning repeated across ticks: %#v", f.logger.entries)
+			}
+		})
 	}
 }
 

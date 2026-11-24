@@ -23,6 +23,21 @@ type discoveryPRLookup int64
 
 func (pr discoveryPRLookup) Error() string { return fmt.Sprintf("need current state of PR #%d", pr) }
 
+// undecidedDeliveryHistory reports that one historical worker loop can be
+// classified neither as delivery nor as non-delivery from local evidence and
+// live remote state. It is not a fault: no stored fact is wrong and no remote
+// call failed. Discovery has no authority to start new work on such an issue,
+// so discoverIssueDelivery turns this into a skip. Reporting it as an error
+// instead would fail the whole scheduler tick on unchanged historical data.
+type undecidedDeliveryHistory struct {
+	LoopID string
+	Reason string
+}
+
+func (e undecidedDeliveryHistory) Error() string {
+	return fmt.Sprintf("cannot determine delivery from worker loop %s: %s", e.LoopID, e.Reason)
+}
+
 // ctx must carry the worker hosting identity but NOT a discovery snapshot.
 // Remote observations are fetched outside the SQLite writer transaction; on
 // reentry all local decisions are made again against current rows.
@@ -55,6 +70,21 @@ func (r *Runner) discoverIssueDelivery(ctx context.Context, project storage.Proj
 				r.wakeSchedulerAfterEnqueue()
 			}
 			return result, nil
+		}
+		var undecided undecidedDeliveryHistory
+		if errors.As(err, &undecided) {
+			// Refuse to start new work, but do not report a scheduler fault: the
+			// stored history is unchanged, so retrying reaches the same conclusion.
+			// Deciding how such an issue is closed stays with an operator.
+			if r.logger != nil {
+				r.logger.Info("worker discovery skipped an issue whose delivery history cannot be decided", map[string]any{
+					"repo":        repo,
+					"issueNumber": issue.Number,
+					"loopId":      undecided.LoopID,
+					"reason":      undecided.Reason,
+				})
+			}
+			return DiscoveryResult{Skipped: 1}, nil
 		}
 		var lookup discoveryPRLookup
 		if !errors.As(err, &lookup) {
@@ -202,7 +232,11 @@ func (r *Runner) discoverIssueDeliveryTx(ctx context.Context, repos *storage.Rep
 		work.SpecPath = firstNonEmpty(work.SpecPath, stringFromAnyDefault(meta["specPath"]))
 	}
 	if source != "" && recoverySpent {
-		return DiscoveryResult{}, false, fmt.Errorf("automatic historical recovery was already attempted; manual review required")
+		// The single automatic recovery this issue was allowed has already run.
+		// Whether that replacement delivered is not decidable from local evidence,
+		// so this belongs to the same class as an undecided history: refuse new
+		// work and leave the decision to an operator.
+		return DiscoveryResult{}, false, undecidedDeliveryHistory{LoopID: source, Reason: "automatic historical recovery was already attempted; manual review required"}
 	}
 
 	work.SpecPath = firstNonEmpty(plannerSpec, work.SpecPath)
@@ -313,7 +347,7 @@ func (r *Runner) persistDiscoveredWorkerLoop(ctx context.Context, repos *storage
 // historical PR without an exact delivery record needs human reconciliation.
 func discoveryHistory(ctx context.Context, repos *storage.Repositories, project storage.ProjectRecord, repo string, issue int64, loop storage.LoopRecord, fingerprint string, states map[int64]PullRequestDetail) (resolved, closed, legacyRevive bool, err error) {
 	unknown := func(reason string) error {
-		return fmt.Errorf("cannot determine delivery from worker loop %s: %s", loop.ID, reason)
+		return undecidedDeliveryHistory{LoopID: loop.ID, Reason: reason}
 	}
 	record, err := delivery.FromMetadata(loop.MetadataJSON)
 	if err != nil {
